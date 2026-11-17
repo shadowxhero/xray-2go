@@ -1,0 +1,235 @@
+import base64
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from urllib.parse import parse_qs, unquote, urlsplit
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'xray_2go.sh'
+
+
+class LifecycleRegression(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='xray2go-test-')
+        self.d = Path(self.tmp.name)
+        self.home = self.d / 'home'
+        self.home.mkdir()
+        self.state = {
+            'version': 2, 'name': '东京 测试', 'server': '2001:db8::9',
+            'cdn': 'cdn.example.com', 'cdn_port': 443, 'subscription_port': 18431,
+            'subscription_path': 'fixture-token', 'subscription_enabled': True,
+            'tunnel_mode': 'quick', 'tunnel_domain': 'old.trycloudflare.com',
+            'argo_port': 18080,
+        }
+        self.config = {'inbounds': [
+            {'tag': 'xhttp-reality', 'port': 18433, 'protocol': 'vless',
+             'settings': {'clients': [{'id': '11111111-1111-4111-8111-111111111111'}]},
+             'streamSettings': {'network': 'xhttp', 'security': 'reality',
+                'realitySettings': {'target': 'xhttp.example.com:443', 'serverNames': ['xhttp.example.com'], 'privateKey': 'fixture'}}},
+            {'tag': 'argo-entry', 'port': 18080, 'protocol': 'vless',
+             'settings': {'clients': [{'id': '11111111-1111-4111-8111-111111111111'}]},
+             'streamSettings': {'network': 'tcp'}},
+            {'tag': 'raw-reality', 'port': 18432, 'protocol': 'vless',
+             'settings': {'clients': [{'id': '11111111-1111-4111-8111-111111111111', 'flow': 'xtls-rprx-vision'}]},
+             'streamSettings': {'network': 'raw', 'security': 'reality',
+                'realitySettings': {'dest': 'raw.example.com:443', 'serverNames': ['raw.example.com'], 'privateKey': 'fixture'}}},
+            {'tag': 'vless-ws', 'port': 3002, 'protocol': 'vless', 'settings': {'clients': [{'id': '11111111-1111-4111-8111-111111111111'}]}, 'streamSettings': {'network': 'ws'}},
+            {'tag': 'vmess-ws', 'port': 3003, 'protocol': 'vmess', 'settings': {'clients': [{'id': '11111111-1111-4111-8111-111111111111'}]}, 'streamSettings': {'network': 'ws'}},
+        ], 'outbounds': [{'protocol': 'freedom'}]}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        (self.home / 'config.json').write_text(json.dumps(self.config))
+        (self.home / 'public.key').write_text('fixture-public-key')
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_shell(self, body, ok=True):
+        # The baseline has an unconditional menu. Source its function definitions only.
+        loader = 'source <(sed \'${/^menu$/d;}\' "$SCRIPT")\n'
+        setup = '''
+work_dir="$CASE/home"
+config_dir="$work_dir/config.json"
+client_dir="$work_dir/url.txt"
+state_file="$work_dir/state.json"
+init_dir="$CASE/init.d"
+systemd_dir="$CASE/systemd"
+run_dir="$CASE/run"
+mkdir -p "$init_dir" "$systemd_dir" "$run_dir"
+derive_public_key() { cat "$work_dir/public.key"; }
+validate_xray_config() { jq -e '.inbounds|length>0' "$1" >/dev/null; }
+'''
+        r = subprocess.run(['bash', '-c', loader + 'set -e\n' + setup + body],
+            env={**os.environ, 'SCRIPT': str(SCRIPT), 'CASE': str(self.d)},
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def nodes(self):
+        text = (self.home / 'url.txt').read_text()
+        encoded = (self.home / 'sub.txt').read_text()
+        self.assertEqual(base64.b64decode(encoded).decode(), text)
+        return [x for x in text.splitlines() if x]
+
+    def test_four_names_are_distinct_and_uuid_flow_ipv6_survive(self):
+        self.run_shell('generate_subscription\n')
+        ns = self.nodes()
+        self.assertEqual(len(ns), 4)
+        self.assertEqual([unquote(urlsplit(x).fragment) for x in ns[:3]],
+            ['东京 测试-RAW-Reality', '东京 测试-XHTTP-Reality', '东京 测试-VLESS-Argo'])
+        raw = urlsplit(ns[0]); q = parse_qs(raw.query)
+        self.assertEqual(raw.hostname, '2001:db8::9')
+        self.assertEqual(raw.username, '11111111-1111-4111-8111-111111111111')
+        self.assertEqual(q['flow'], ['xtls-rprx-vision'])
+        vm = json.loads(base64.b64decode(ns[3][8:]))
+        self.assertEqual(vm['ps'], '东京 测试-VMess-Argo')
+        self.assertEqual(vm['scy'], 'aes-128-gcm')
+
+    def test_quick_domain_sync_updates_both_nodes_and_is_idempotent(self):
+        (self.home / 'argo.log').write_text('https://older.trycloudflare.com\nhttps://fresh.trycloudflare.com\n')
+        self.run_shell('generate_subscription\nsync_subscription\nsync_subscription\n')
+        ns = self.nodes()
+        self.assertEqual(parse_qs(urlsplit(ns[2]).query)['host'], ['fresh.trycloudflare.com'])
+        self.assertEqual(json.loads(base64.b64decode(ns[3][8:]))['host'], 'fresh.trycloudflare.com')
+        self.assertEqual(json.loads(base64.b64decode(ns[3][8:]))['ps'], '东京 测试-VMess-Argo')
+
+    def test_old_quick_log_cannot_overwrite_fixed_domain(self):
+        self.state.update(tunnel_mode='token', tunnel_domain='fixed-b.example.com')
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        (self.home / 'argo.log').write_text('https://stale.trycloudflare.com\n')
+        self.run_shell('generate_subscription\nsync_subscription\n')
+        ns = self.nodes()
+        self.assertEqual(parse_qs(urlsplit(ns[2]).query)['sni'], ['fixed-b.example.com'])
+        self.assertEqual(json.loads(base64.b64decode(ns[3][8:]))['sni'], 'fixed-b.example.com')
+
+    def test_direct_port_update_matches_transport_not_array_position(self):
+        self.run_shell('set_direct_port raw 18434\n')
+        c = json.loads((self.home / 'config.json').read_text())
+        self.assertEqual([i['port'] for i in c['inbounds']], [18433, 18080, 18434, 3002, 3003])
+        self.assertEqual(urlsplit(self.nodes()[0]).port, 18434)
+
+    def test_invalid_port_leaves_config_and_subscription_unchanged(self):
+        self.run_shell('generate_subscription\n')
+        before = [(self.home / n).read_bytes() for n in ('config.json', 'url.txt', 'sub.txt')]
+        r = self.run_shell('set_direct_port raw 70000\n', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(before, [(self.home / n).read_bytes() for n in ('config.json', 'url.txt', 'sub.txt')])
+
+    def test_nginx_only_serves_exact_subscription_path(self):
+        self.d.chmod(0o711)
+        self.home.chmod(0o711)
+        self.run_shell('generate_subscription\nwrite_nginx_config\n')
+        conf = self.home / 'nginx.conf'
+        nginx = subprocess.run(['nginx', '-t', '-c', str(conf)], capture_output=True, text=True)
+        self.assertEqual(nginx.returncode, 0, nginx.stderr)
+        p = subprocess.Popen(['nginx', '-c', str(conf), '-g', 'daemon off;'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (p.terminate(), p.wait(timeout=5)) if p.poll() is None else None)
+        import urllib.request, urllib.error, time
+        for _ in range(30):
+            try:
+                body = urllib.request.urlopen('http://127.0.0.1:18431/fixture-token', timeout=.3).read(); break
+            except OSError: time.sleep(.05)
+        else: self.fail('subscription listener never started')
+        self.assertEqual(base64.b64decode(body), (self.home / 'url.txt').read_bytes())
+        for path in ('/config.json', '/state.json', '/fixture-token/config.json', '/'):
+            with self.assertRaises(urllib.error.HTTPError) as e: urllib.request.urlopen('http://127.0.0.1:18431'+path)
+            self.assertEqual(e.exception.code, 404)
+            e.exception.close()
+
+    def test_service_definitions_include_supervision_for_all_components(self):
+        self.run_shell('write_runtime_helpers\nwrite_openrc_services\nwrite_systemd_services\n')
+        for name in ('xray2go-core', 'xray2go-tunnel', 'xray2go-sub', 'xray2go-sync'):
+            p = self.d / 'init.d' / name
+            r = subprocess.run(['sh', '-c', 'source() { :; }; . "$1"; test "$supervisor" = supervise-daemon && test "$respawn_delay" -ge 5', 'test', str(p)])
+            self.assertEqual(r.returncode, 0, name)
+            s = (self.d / 'systemd' / (name+'.service')).read_text()
+            self.assertIn('Restart=always', s)
+            self.assertIn('StartLimitIntervalSec=0', s)
+        self.assertNotIn('rc-service', (self.home/'sync-loop.sh').read_text())
+
+    def test_each_reality_link_uses_its_own_key(self):
+        self.config['inbounds'][0]['streamSettings']['realitySettings']['privateKey'] = 'xhttp-private'
+        self.config['inbounds'][2]['streamSettings']['realitySettings']['privateKey'] = 'raw-private'
+        (self.home / 'config.json').write_text(json.dumps(self.config))
+        self.run_shell('derive_public_key() { case "$1" in raw-private) echo raw-public;; xhttp-private) echo xhttp-public;; *) return 1;; esac; }\ngenerate_subscription\n')
+        ns = self.nodes()
+        self.assertEqual(parse_qs(urlsplit(ns[0]).query)['pbk'], ['raw-public'])
+        self.assertEqual(parse_qs(urlsplit(ns[1]).query)['pbk'], ['xhttp-public'])
+
+    def test_failed_tunnel_restart_restores_credentials_and_state(self):
+        self.state.update(tunnel_mode='token', tunnel_domain='good.example.com')
+        (self.home/'state.json').write_text(json.dumps(self.state))
+        (self.home/'tunnel.token').write_text('good-fixture-token')
+        (self.d/'new-token').write_text('bad-fixture-token')
+        self.run_shell('generate_subscription\n')
+        before = (self.home/'state.json').read_bytes()
+        r = self.run_shell('service_action() { return 1; }\nset_tunnel token bad.example.com "$CASE/new-token"\n', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(before, (self.home/'state.json').read_bytes())
+        self.assertEqual((self.home/'tunnel.token').read_text(), 'good-fixture-token')
+
+    def test_upgrade_failure_restores_previous_files(self):
+        self.run_shell('generate_subscription\nwrite_nginx_config\n')
+        before = {n:(self.home/n).read_bytes() for n in ('state.json','config.json','url.txt','sub.txt')}
+        r = self.run_shell('''
+install_dependencies() { :; }
+service_status() { return 1; }
+service_enabled() { return 1; }
+is_openrc() { return 0; }
+legacy_retire() { :; }
+install_runtime_copy() { :; }
+configure_services() { :; }
+service_action() { return 0; }
+service_disable() { :; }
+start_services() { return 1; }
+upgrade_installation
+''', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        for n,b in before.items(): self.assertEqual((self.home/n).read_bytes(), b, n)
+
+    def test_failed_legacy_import_leaves_no_partial_state(self):
+        (self.home / 'state.json').unlink()
+        vm = base64.b64encode(json.dumps({'add': 'cdn.example.com', 'port': '443', 'ps': 'Legacy', 'host': 'fixed.example.com'}).encode()).decode()
+        (self.home / 'url.txt').write_text('vless://11111111-1111-4111-8111-111111111111@[2001:db8::9]:18432?type=tcp\nvmess://'+vm+'\n')
+        self.config['inbounds'][1]['settings']['fallbacks'] = [{'dest': 3002}]
+        (self.home / 'config.json').write_text(json.dumps(self.config))
+        r = self.run_shell('import_caddy_settings() { return 1; }\nload_legacy_state\n', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse((self.home / 'state.json').exists())
+
+    def test_cli_process_substitution_does_not_lose_runtime_script(self):
+        r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
+            env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), '2.0.0')
+
+    def test_caddy_migration_rejects_unrelated_websites(self):
+        cf = self.d / 'Caddyfile'
+        cf.write_text(':43013 {\n handle /KeepOldPath {\n root * /srv/another-site\n }\n}\n')
+        before = (self.home / 'state.json').read_bytes()
+        r = self.run_shell('import_caddy_settings "$CASE/Caddyfile"\n', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(before, (self.home / 'state.json').read_bytes())
+
+    def test_legacy_raw_tcp_and_ipv6_can_change_port_without_touching_argo(self):
+        self.config['inbounds'][2]['streamSettings']['network'] = 'tcp'
+        (self.home / 'config.json').write_text(json.dumps(self.config))
+        self.run_shell('set_direct_port raw 18434\n')
+        c = json.loads((self.home / 'config.json').read_text())
+        self.assertEqual(c['inbounds'][1]['port'], 18080)
+        self.assertEqual(urlsplit(self.nodes()[0]).hostname, '2001:db8::9')
+        self.assertEqual(urlsplit(self.nodes()[0]).port, 18434)
+
+    def test_caddy_migration_reads_port_path_and_preserves_credentials(self):
+        cf = self.d / 'Caddyfile'
+        cf.write_text('{\n auto_https off\n}\n:43013 {\n handle /KeepOldPath {\n root * /etc/xray\n try_files /sub.txt\n }\n}\n')
+        before = (self.home / 'config.json').read_bytes()
+        self.run_shell('import_caddy_settings "$CASE/Caddyfile"\n')
+        s = json.loads((self.home / 'state.json').read_text())
+        self.assertEqual(s['subscription_port'], 43013)
+        self.assertEqual(s['subscription_path'], 'KeepOldPath')
+        self.assertEqual(before, (self.home / 'config.json').read_bytes())
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
