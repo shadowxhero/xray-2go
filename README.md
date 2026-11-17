@@ -1,4 +1,4 @@
-# Xray-2go v2.0.6
+# Xray-2go v2.0.7
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -65,9 +65,17 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 2go --version
 2go --check
 2go --restart       # 临时隧道重新申请，有 60 秒冷却
-2go --upgrade       # 使用当前本机版本重建服务；获取更新应先下载新版
+2go --update        # 下载/校验并保存 GitHub 最新脚本，不重启服务
+2go --repair        # 只用本机版本修复服务，保留配置，可能重启原服务
+2go --upgrade       # 兼容旧命令，等同 --repair
 2go --uninstall
 ```
+
+新版已安装时，菜单 **2 是在线更新脚本**，菜单 **17 是修复当前服务**。旧版安装仍在菜单 2 提供保留配置迁移。
+
+在线更新先下载到临时文件，再做 Bash 语法、版本和脚本结构检查；校验时不执行下载内容，不允许降级。旧脚本备份在本项目受限备份目录，校验失败不替换；相同内容不重复更新。更新不碰节点认证、订阅端口/路径、服务定义或内核，退出旧菜单后重新运行 `2go` 使用新版本。校验不等于独立签名认证，下载来源信任依赖 GitHub 官方仓库的 HTTPS。
+
+旧版 `2go` 没有 `--update` 时，首次请运行仓库一键命令取得新版，再在菜单 2 在线更新，或继续用上面的 `--upgrade` 命令迁移。
 
 菜单支持：独立节点命名、RAW/XHTTP 端口、订阅端口、订阅开关、服务启停、固定/临时隧道、UUID、SNI、Argo 优选 IP/域名和端口、IPv4/IPv6 直连地址、Argo 内部端口。
 
