@@ -1,4 +1,4 @@
-# Xray-2go v2.0.4
+# Xray-2go v2.0.5
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -35,7 +35,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 - 先备份，再检查 Xray、Nginx 配置，最后交接端口。
 - 保留订阅端口、路径、UUID、REALITY 私钥/短 ID/SNI、Argo 优选地址及固定 JSON/Token 隧道。
 - 旧 gRPC REALITY 节点转换为 RAW + Vision，原端口不变，客户端须更新订阅。
-- 四节点分别命名为 `基础名-RAW-Reality`、`基础名-XHTTP-Reality`、`基础名-VLESS-Argo`、`基础名-VMess-Argo`。可用 `NODE_NAME` 指定新基础名。
+- 四节点分别命名为 `基础名-RAW-Reality`、`基础名-XHTTP-Reality`、`基础名-VLESS-Argo`、`基础名-VMess-Argo`。默认基础名沿用 Sing-box 的“国家代码-服务商”（例如 `US-HostPapa`，空格转下划线），查询失败才退回 hostname。`NODE_NAME` 自定义优先。升级保留自定义名，旧版误用当前 hostname 的默认名会重新查询。
+- 已不存在的旧 Caddy 服务不会因为残留配置文件阻断重复升级；升级失败会显示阶段，并回滚原配置与服务。
 - Caddy 只有被确认是旧脚本的单订阅站点才会停止；不擅自删除 Caddy 软件包或其他网站。
 - Nginx 使用独立配置与 PID，不覆盖系统 Nginx 或 ArgoX 配置。
 - 迁移失败尝试恢复备份和原有服务；备份目录权限仅 root 可访问。
