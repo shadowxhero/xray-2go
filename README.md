@@ -1,4 +1,4 @@
-# Xray-2go v2.0.0
+# Xray-2go v2.0.3
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -83,6 +83,8 @@ Linux 环境需 Bash、Python 3、jq、Nginx：
 ```bash
 bash -n xray_2go.sh
 python3 -m unittest discover -s tests -v
+# root + util-linux；独立挂载命名空间验证卸载，不触碰宿主 /etc
+unshare -m -- bash tests/uninstall_namespace.sh
 ```
 
 回归包含命名/UUID/Vision/IPv6、端口定位、固定域名、原子订阅、真实 Nginx 文件隔离、凭据回滚与迁移失败恢复。OpenRC 的 SIGKILL 自愈和主动停止另在临时端口验收。
