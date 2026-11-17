@@ -1,4 +1,4 @@
-# Xray-2go v2.0.5
+# Xray-2go v2.0.6
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -70,6 +70,32 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 ```
 
 菜单支持：独立节点命名、RAW/XHTTP 端口、订阅端口、订阅开关、服务启停、固定/临时隧道、UUID、SNI、Argo 优选 IP/域名和端口、IPv4/IPv6 直连地址、Argo 内部端口。
+
+### 恢复的交互方式（v2.0.6）
+
+- 节点页恢复绿色标题、紫色链接、空行和分隔；新安装完成后直接展示。若已安装 `qrencode` 或保留旧二维码工具，则显示二维码，不强制下载第三方二进制。
+- 修改 RAW、XHTTP、订阅、Argo 内部端口支持回车随机生成，最多尝试 100 次，跳过占用、当前配置以及 3001–3003 保留端口。随机范围为 2000–65000。NAT 用户应优先手动填写服务商允许的端口。
+- 服务启停、隧道模式、订阅管理改为中文数字菜单；非法输入不再被当作关闭订阅。关闭/开启保留原订阅路径。
+- SNI 提供候选列表和自定义输入，分别作用于 RAW 或 XHTTP；候选不代表本站 TLS/后量子能力已验证。
+- 直连 IP 可自动获取 IPv4/IPv6 或手动填写；自动检测到 WARP 或无法确认出口时不更新。
+- Argo 优选支持编号、回车保持当前、域名、IPv4、`域名:端口`、`[IPv6]:端口`；同时更新两个 Argo 节点，不改直连节点。
+
+### 合并后的 Argo 优选预设
+
+来源：[eooce/Sing-box](https://github.com/eooce/Sing-box)、[fscarmen/ArgoX](https://github.com/fscarmen/ArgoX)。2026-11-18 从用户电脑和小水管分别用真实隧道的 SNI/Host 进行 TLS + WebSocket 测试，下列 8 个均返回 HTTP 101：
+
+```
+cf.090227.xyz
+cf.877774.xyz
+cf.877771.xyz
+cdns.doon.eu.org
+time.is
+skk.moe
+ip.sb
+xn--b6gac.eu.org
+```
+
+排除：`cf.zhetengsha.eu.org`（无 A/AAAA）、`cfip.xxxxxxxx.tk`（NXDOMAIN）、`cdn.2020111.xyz`（SERVFAIL）、`bestcf.top`（转到域名到期地址，非正常入口）。这是当时的转发可用性结果，不是带宽排名，也不保证未来或所有运营商可用；不自动更换现有地址。
 
 固定隧道凭据通过服务器上的文件导入，不将 Token 粘贴到命令行。固定模式不会被旧临时隧道日志覆写。订阅只开放精确路径下的编码文本，不提供配置目录浏览。
 
