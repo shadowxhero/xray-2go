@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.0 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.0.4 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.3
+SCRIPT_VERSION=2.0.4
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -12,6 +12,7 @@ systemd_dir=/etc/systemd/system
 run_dir=/run
 shortcut_path=/usr/bin/2go
 archive_root=/root
+argox_config=/etc/argox/inbound.json
 SELF=${BASH_SOURCE[0]}
 resolve_self() {
     if [ -f "$SELF" ]; then SELF=$(readlink -f "$SELF"); return 0; fi
@@ -794,17 +795,105 @@ show_nodes() {
     printf '\n订阅：http://%s:%s/%s\n' "$(host_uri "$(state server)")" "$(state subscription_port)" "$(state subscription_path)"
     printf 'NAT：订阅端口必须在服务商面板映射；服务器内本机 HTTP 成功不代表公网已映射。\n'
 }
+menu_color() { printf '\033[1;%sm%s\033[0m\n' "$1" "$2"; }
+menu_separator() { menu_color 36 '----------------------------------------'; }
+project_service_exists() {
+    [ -f "$init_dir/$1" ] || [ -f "$systemd_dir/$1.service" ]
+}
+installation_state() {
+    local s complete=true found=false
+    if [ -f "$work_dir/.installed" ]; then
+        [ -x "$work_dir/xray" ] && [ -s "$config_dir" ] && [ -s "$state_file" ] && [ -s "$client_dir" ] || complete=false
+        for s in "${SERVICES[@]}"; do project_service_exists "$s" || complete=false;done
+        if [ "$complete" = true ];then printf 'installed\n';else printf 'partial\n';fi
+        return
+    fi
+    if [ -x "$work_dir/xray" ] && [ -s "$config_dir" ] && [ -s "$client_dir" ];then
+        for s in xray tunnel;do
+            if legacy_owned "$init_dir/$s" || legacy_owned "$systemd_dir/$s.service";then printf 'legacy\n';return;fi
+        done
+    fi
+    for s in "${SERVICES[@]}";do project_service_exists "$s" && found=true;done
+    if [ "$found" = true ] || [ -e "$config_dir" ] || [ -e "$state_file" ] || [ -e "$work_dir/.installing" ];then printf 'partial\n'
+    elif [ -f "$argox_config" ];then printf 'foreign\n'
+    else printf 'absent\n';fi
+}
 show_status() {
-    local s
-    printf 'Xray-2go v%s\n' "$SCRIPT_VERSION"
-    for s in "${SERVICES[@]}"; do if service_status "$s"; then printf '%s: running\n' "$s"; else printf '%s: stopped\n' "$s";fi;done
+    local status s label
+    status=$(installation_state)
+    menu_color 35 "=== Xray-2go v$SCRIPT_VERSION ==="
+    case "$status" in
+        installed) menu_color 32 '安装状态：已安装';;
+        legacy) menu_color 33 '安装状态：旧版安装，请先迁移';;
+        partial) menu_color 33 '安装状态：安装不完整，请检查后修复/迁移';;
+        foreign) menu_color 33 '安装状态：本项目未安装；检测到 ArgoX，请勿覆盖其配置或服务';;
+        absent) menu_color 33 '安装状态：未安装';;
+    esac
+    if [ "$status" = installed ] || [ "$status" = partial ];then
+        for s in "${SERVICES[@]}";do
+            case "$s" in xray2go-core) label=Xray;;xray2go-tunnel) label=Argo;;xray2go-sub) label=Nginx订阅;;xray2go-sync) label=订阅同步;;esac
+            if ! project_service_exists "$s";then menu_color 33 "$label：未安装"
+            elif service_status "$s";then menu_color 32 "$label：运行中"
+            else menu_color 31 "$label：已停止";fi
+        done
+    fi
+}
+menu_option_allowed() {
+    local status=$1 choice=$2
+    case "$choice" in 0|h|H) return 0;;esac
+    case "$status:$choice" in
+        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16) return 0;;
+        partial:2) [ -x "$work_dir/xray" ] && [ -s "$config_dir" ] && [ -s "$client_dir" ];return $?;;
+        *) return 1;;
+    esac
+}
+render_menu() {
+    local status
+    status=$(installation_state)
+    show_status; menu_separator
+    case "$status" in
+        absent) menu_color 32 '1. 新安装';;
+        legacy) menu_color 32 '2. 升级/从 Caddy 迁移（保留配置）';;
+        partial)
+            if menu_option_allowed partial 2;then menu_color 33 '2. 修复/迁移现有安装（先备份）';else menu_color 33 '配置或内核缺失，暂不提供修改/卸载入口，请先检查安装记录。';fi;;
+        installed)
+            menu_color 32 '2. 升级/修复服务（保留配置）'
+            menu_color 32 '3. 查看节点与订阅'
+            menu_color 32 '4. 修改节点名称'
+            menu_separator
+            menu_color 32 '5. 修改 RAW 端口'
+            menu_color 32 '6. 修改 XHTTP 端口'
+            menu_color 32 '7. 修改订阅端口'
+            menu_color 32 '8. 订阅启用/关闭'
+            menu_separator
+            menu_color 32 '9. 服务启停'
+            menu_color 32 '10. 隧道管理'
+            menu_color 32 '11. 修改 UUID'
+            menu_color 32 '12. 修改 Reality SNI'
+            menu_color 32 '13. 修改 Argo 优选地址/端口'
+            menu_color 32 '14. 修改直连 IP（IPv4/IPv6）'
+            menu_color 32 '15. 修改 Argo 内部端口'
+            menu_separator
+            menu_color 31 '16. 卸载';;
+    esac
+    menu_separator
+    menu_color 35 'h. 帮助'
+    menu_color 31 '0. 退出'
+    menu_separator
+}
+menu_pause() {
+    if [ -t 0 ];then read -n 1 -s -r -p $'\033[1;91m按任意键返回主菜单…\033[0m' || true;printf '\n';fi
 }
 menu() {
-    local choice value network h p mode domain file
+    local choice value network h p mode domain file status
     while true; do
-        show_status
-        printf '\n1. 新安装\n2. 升级/从 Caddy 迁移（保留配置）\n3. 查看节点与订阅\n4. 修改节点名称\n5. 修改 RAW 端口\n6. 修改 XHTTP 端口\n7. 修改订阅端口\n8. 订阅启用/关闭\n9. 服务启停\n10. 隧道管理\n11. 修改 UUID\n12. 修改 Reality SNI\n13. 修改 Argo 优选地址/端口\n14. 修改直连 IP（IPv4/IPv6）\n15. 修改 Argo 内部端口\n16. 卸载\n0. 退出\n'
-        reading '选择：' choice
+        [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ] || clear
+        render_menu
+        reading $'\033[1;91m请选择：\033[0m' choice || return 0
+        status=$(installation_state)
+        if ! menu_option_allowed "$status" "$choice";then
+            red '该选项在当前安装状态不可用，请选择屏幕中显示的选项。';menu_pause;continue
+        fi
         case "$choice" in
             1) install_fresh ;;
             2) upgrade_installation ;;
@@ -822,8 +911,10 @@ menu() {
             15) reading 'Argo 内部新端口：' value;set_argo_port "$value" ;;
             16) reading '确认卸载本脚本并归档配置？输入 yes：' value;[ "$value" != yes ] || uninstall_owned ;;
             0) return 0 ;;
+            h|H) main --help ;;
             *) red '无效选项' ;;
         esac
+        menu_pause
     done
 }
 rename_nodes() { [ -n "$1" ] && state_string name "$1" && generate_subscription_unlocked; }
