@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.4 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.0.5 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.4
+SCRIPT_VERSION=2.0.5
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -49,6 +49,17 @@ get_realip() {
     ip=$(curl --noproxy '*' -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null) || ip=$(curl --noproxy '*' -6 -fsS --max-time 5 https://api64.ipify.org 2>/dev/null) || return 1
     valid_host "$ip" || return 1
     printf '%s\n' "$ip"
+}
+# 沿用 Sing-box 的国家代码-服务商基础名；自定义 NODE_NAME 优先。
+resolve_node_name() {
+    if [ -n "${NODE_NAME:-}" ]; then printf '%s\n' "$NODE_NAME"; return 0; fi
+    local endpoint data name
+    for endpoint in https://api.ip.sb/geoip https://ipapi.co/json; do
+        data=$(curl -fsS --max-time 4 "$endpoint" 2>/dev/null) || continue
+        name=$(jq -er 'select((.country_code|type)=="string") | (.isp // .org // "") as $isp | select((.country_code|length)>0 and ($isp|length)>0) | .country_code+"-"+$isp | gsub("[[:space:]]+";"_")' <<< "$data" 2>/dev/null) || continue
+        printf '%s\n' "$name";return 0
+    done
+    hostname
 }
 uri() { jq -rn --arg v "$1" '$v|@uri'; }
 host_uri() { if [[ "$1" == *:* ]]; then printf '[%s]' "${1#[}" | sed 's/]]$/]/'; else printf '%s' "$1"; fi; }
@@ -479,8 +490,20 @@ stop_owned_processes() {
 stop_legacy_sync_processes() { stop_owned_processes legacy-sync; }
 stop_owned_caddy() {
     check_caddy_owned /etc/caddy/Caddyfile || { red 'Caddy 不属于本脚本，拒绝停止'; return 1; }
-    if is_openrc; then rc-service caddy stop >/dev/null 2>&1 || return 1; rc-update del caddy >/dev/null 2>&1 || true
-    else systemctl disable --now caddy >/dev/null 2>&1 || return 1; fi
+    if is_openrc; then
+        if [ -f "$init_dir/caddy" ]; then
+            rc-service caddy stop >/dev/null 2>&1 || return 1
+        else
+            local p exe
+            for p in /proc/[0-9]*; do
+                exe=$(readlink "$p/exe" 2>/dev/null) || continue
+                case "$exe" in */caddy|*/caddy\ \(deleted\)) red '发现无服务定义的 Caddy 进程，请先确认归属';return 1;; esac
+            done
+        fi
+        rc-update del caddy >/dev/null 2>&1 || true
+    else
+        if systemctl cat caddy.service >/dev/null 2>&1; then systemctl disable --now caddy >/dev/null 2>&1 || return 1; fi
+    fi
     touch "$work_dir/.caddy-retired"
 }
 load_legacy_state() {
@@ -611,24 +634,32 @@ upgrade_installation() (
     backup_installation || return 1
     local backup; backup=$(cat "$work_dir/last-backup")
     UPGRADE_BACKUP="$backup"
-    trap 'r=$?; if [ "$r" -ne 0 ]; then rollback_upgrade "$backup"; fi' EXIT
+    local upgrade_stage='导入原安装状态'
+    trap 'r=$?; if [ "$r" -ne 0 ]; then red "升级失败阶段：$upgrade_stage（退出码 $r）"; rollback_upgrade "$backup"; fi' EXIT
     load_legacy_state || return 1
-    [ -z "${NODE_NAME:-}" ] || state_string name "$NODE_NAME"
+    if [ -n "${NODE_NAME:-}" ];then state_string name "$NODE_NAME"
+    elif [ "$(state name)" = "$(hostname)" ];then state_string name "$(resolve_node_name)";fi
+    upgrade_stage='校验 Xray 配置'
     # 只校正旧 RAW 入站/flow；不改 UUID、私钥、短 ID、端口和 SNI。
     local c; c=$(mktemp "$work_dir/.config.XXXXXX")
     jq '(.inbounds[]|select(.protocol=="vless" and .streamSettings.security=="reality" and (.streamSettings.network=="raw" or .streamSettings.network=="tcp" or .streamSettings.network=="grpc"))) |= (del(.streamSettings.grpcSettings) | .streamSettings.network="raw" | (.settings.clients[].flow)="xtls-rprx-vision")' "$config_dir" > "$c"
     validate_xray_config "$c" || { rm -f "$c"; return 1; }; chmod 600 "$c"; mv "$c" "$config_dir"
     chmod 711 "$work_dir"
+    upgrade_stage='生成订阅和校验 Nginx 配置'
     generate_subscription || return 1
     write_nginx_config && nginx -t -c "$work_dir/nginx.conf" >/dev/null 2>&1 || return 1
     # 到这里配置已全部验证，才交接监听端口。
+    upgrade_stage='交接旧 Caddy 服务'
     if [ ! -f "$work_dir/.caddy-retired" ] && [ -f /etc/caddy/Caddyfile ]; then
         check_caddy_owned /etc/caddy/Caddyfile || { red '检测到共享或未知 Caddy 配置，拒绝自动交接';return 1; }
         stop_owned_caddy || return 1
     fi
+    upgrade_stage='清理已确认归属的旧服务'
     legacy_retire || return 1
+    upgrade_stage='更新本机脚本和服务定义'
     install_runtime_copy || return 1
     configure_services || return 1
+    upgrade_stage='启动服务和验证订阅'
     start_services || { red '迁移启动未通过，请保留备份并检查服务'; return 1; }
     touch "$work_dir/.installed"
     trap - EXIT
@@ -684,7 +715,7 @@ install_fresh() (
     uuid=${UUID:-$(random_uuid)}; output=$("$work_dir/xray" x25519) || return 1
     private=$(awk '/^PrivateKey/{print $NF}' <<< "$output"); [ -n "$private" ] || return 1
     server=${SERVER_IP:-$(get_realip)}; server=$(normalize_host "$server"); valid_host "$server" || return 1
-    name=${NODE_NAME:-$(hostname)}
+    name=$(resolve_node_name)
     jq -n --arg id "$uuid" --arg private "$private" --argjson raw "$rawp" --argjson xh "$xhp" --argjson ap "$ap" '{log:{access:"/dev/null",error:"/dev/null",loglevel:"none"},inbounds:[{tag:"argo-entry",listen:"127.0.0.1",port:$ap,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none",fallbacks:[{dest:3001},{path:"/vless-argo",dest:3002},{path:"/vmess-argo",dest:3003}]},streamSettings:{network:"raw"}},{tag:"fallback",listen:"127.0.0.1",port:3001,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"raw"}},{tag:"vless-ws",listen:"127.0.0.1",port:3002,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"ws",wsSettings:{path:"/vless-argo"}}},{tag:"vmess-ws",listen:"127.0.0.1",port:3003,protocol:"vmess",settings:{clients:[{id:$id}]},streamSettings:{network:"ws",wsSettings:{path:"/vmess-argo"}}},{tag:"raw-reality",port:$raw,protocol:"vless",settings:{clients:[{id:$id,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"raw",security:"reality",realitySettings:{target:"www.iij.ad.jp:443",serverNames:["www.iij.ad.jp"],privateKey:$private,shortIds:[""]}}},{tag:"xhttp-reality",port:$xh,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"xhttp",security:"reality",realitySettings:{target:"www.nazhumi.com:443",serverNames:["www.nazhumi.com"],privateKey:$private,shortIds:[""]}}}],outbounds:[{protocol:"freedom",tag:"direct"}]}' > "$config_dir"
     validate_xray_config "$config_dir" || return 1
     jq -n --arg name "$name" --arg server "$server" --arg cdn "${CFIP:-cdns.doon.eu.org}" --argjson cp "${CFPORT:-443}" --arg path "$(random_path)" --argjson sp "$subp" --argjson ap "$ap" '{version:2,name:$name,server:$server,cdn:$cdn,cdn_port:$cp,subscription_port:$sp,subscription_path:$path,subscription_enabled:true,tunnel_mode:"quick",tunnel_domain:"",argo_port:$ap}' > "$state_file"

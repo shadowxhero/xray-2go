@@ -183,6 +183,39 @@ validate_xray_config() { jq -e '.inbounds|length>0' "$1" >/dev/null; }
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(list(self.home.glob('.validate.*')),[])
 
+    def test_retired_caddy_config_without_service_is_safe_to_skip(self):
+        r=self.run_shell('''
+check_caddy_owned() { return 0; }
+is_openrc() { return 0; }
+rc-service() { return 1; }
+rc-update() { return 0; }
+stop_owned_caddy
+''',ok=False)
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertTrue((self.home/'.caddy-retired').exists())
+
+    def test_default_name_uses_country_and_isp_with_underscores(self):
+        out=self.run_shell('''
+curl() { printf '{"country_code":"US","isp":"Host Papa"}'; }
+resolve_node_name
+''').stdout.strip()
+        self.assertEqual(out,'US-Host_Papa')
+
+    def test_name_lookup_falls_back_when_first_provider_returns_empty_json(self):
+        out=self.run_shell('''
+curl() { case "${@: -1}" in *ip.sb*) echo '{}';; *) echo '{"country_code":"US","org":"HostPapa"}';; esac; }
+resolve_node_name
+''').stdout.strip()
+        self.assertEqual(out,'US-HostPapa')
+
+    def test_explicit_node_name_never_calls_geolocation(self):
+        out=self.run_shell('''
+NODE_NAME=SC-Zenixcloud
+curl() { echo unexpected >&2;return 1; }
+resolve_node_name
+''').stdout.strip()
+        self.assertEqual(out,'SC-Zenixcloud')
+
     def test_upgrade_failure_restores_previous_files(self):
         self.run_shell('generate_subscription\nwrite_nginx_config\n')
         before = {n:(self.home/n).read_bytes() for n in ('state.json','config.json','url.txt','sub.txt')}
@@ -262,7 +295,7 @@ cleanup_failed_install
         r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
             env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '2.0.4')
+        self.assertEqual(r.stdout.strip(), '2.0.5')
 
     def test_caddy_migration_rejects_unrelated_websites(self):
         cf = self.d / 'Caddyfile'
