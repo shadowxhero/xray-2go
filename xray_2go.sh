@@ -2,7 +2,7 @@
 # Xray-2go v2.0.0 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.0
+SCRIPT_VERSION=2.0.3
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -10,6 +10,8 @@ state_file="$work_dir/state.json"
 init_dir=/etc/init.d
 systemd_dir=/etc/systemd/system
 run_dir=/run
+shortcut_path=/usr/bin/2go
+archive_root=/root
 SELF=${BASH_SOURCE[0]}
 resolve_self() {
     if [ -f "$SELF" ]; then SELF=$(readlink -f "$SELF"); return 0; fi
@@ -78,7 +80,13 @@ derive_public_key() {
     pub=$(printf '%s\n' "$output" | awk '/^Password|^PublicKey/ {print $NF;exit}')
     [ -n "$pub" ] && printf '%s\n' "$pub"
 }
-validate_xray_config() { "$work_dir/xray" run -test -c "$1" >/dev/null 2>&1; }
+validate_xray_config() {
+    local check result=0
+    check=$(mktemp "$work_dir/.validate.XXXXXX.json") || return 1
+    chmod 600 "$check"; cp "$1" "$check" || { rm -f "$check"; return 1; }
+    "$work_dir/xray" run -test -format json -c "$check" >/dev/null 2>&1 || result=$?
+    rm -f "$check"; return "$result"
+}
 
 # 始终由真实入站和持久状态重新导出，不对 URI 做固定行号/IPv4 正则替换。
 generate_subscription() { with_lock generate_subscription_unlocked; }
@@ -322,11 +330,12 @@ tunnel_worker() {
 }
 
 subscription_probe() {
-    local p path i probe
+    local p path i probe nginx_pid
     p=$(state subscription_port); path=$(state subscription_path)
     probe=$(mktemp "$work_dir/.probe.XXXXXX") || return 1
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        if curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$p/$path" -o "$probe" 2>/dev/null && cmp -s "$probe" "$work_dir/public/sub.txt"; then
+        nginx_pid=''; [ ! -s "$work_dir/nginx.pid" ] || read -r nginx_pid < "$work_dir/nginx.pid"
+        if [[ "$nginx_pid" =~ ^[0-9]+$ ]] && [ "$(readlink "/proc/$nginx_pid/exe" 2>/dev/null)" = "$(command -v nginx)" ] && curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$p/$path" -o "$probe" 2>/dev/null && cmp -s "$probe" "$work_dir/public/sub.txt"; then
             rm -f "$probe"; return 0
         fi
         sleep .2
@@ -388,6 +397,7 @@ backup_installation() {
     for f in "$state_file" "$client_dir" "$work_dir/sub.txt" "$work_dir/nginx.conf" "$work_dir/runtime.sh" "$work_dir/sync-loop.sh" "$work_dir/tunnel-worker.sh" "$work_dir/tunnel.token" "$work_dir/tunnel.json" "$work_dir/tunnel.yml" /etc/caddy/Caddyfile; do
         [ ! -f "$f" ] || cp -pL "$f" "$b/$(basename "$f")"
     done
+    if [ -e "$shortcut_path" ] || [ -L "$shortcut_path" ]; then cp -a "$shortcut_path" "$b/shortcut.before"; fi
     local s
     for s in "${SERVICES[@]}"; do
         if service_status "$s"; then touch "$b/running-$s"; fi
@@ -519,11 +529,10 @@ install_dependencies() {
 install_runtime_copy() {
     if [ "$SELF" != "$work_dir/runtime.sh" ]; then cp "$SELF" "$work_dir/runtime.sh"; fi
     chmod 700 "$work_dir/runtime.sh"
-    cat > /usr/bin/2go <<'EOF'
-#!/bin/sh
-exec /bin/bash /etc/xray/runtime.sh "$@"
-EOF
-    chmod 755 /usr/bin/2go
+    local entry
+    entry=$(mktemp "${shortcut_path}.XXXXXX") || return 1
+    printf '#!/bin/sh\nexec /bin/bash /etc/xray/runtime.sh "$@"\n' > "$entry"
+    chmod 755 "$entry"; mv -f "$entry" "$shortcut_path"
 }
 configure_services() {
     write_runtime_helpers
@@ -571,8 +580,11 @@ rollback_upgrade() {
         if [ -f "$b/$f" ]; then
             if [ "$f" = sub.txt ] && [ -L "$work_dir/sub.txt" ] && [ ! -f "$b/state.json" ]; then rm -f "$work_dir/sub.txt"; fi
             cp -p "$b/$f" "$work_dir/$f"
-        elif [ "$f" = state.json ]; then rm -f "$state_file"; fi
+        else rm -f "$work_dir/$f"; fi
     done
+    if [ -e "$b/shortcut.before" ] || [ -L "$b/shortcut.before" ]; then
+        rm -f "$shortcut_path"; cp -a "$b/shortcut.before" "$shortcut_path"
+    elif [ -f "$shortcut_path" ] && grep -Fq /etc/xray/runtime.sh "$shortcut_path"; then rm -f "$shortcut_path"; fi
     for s in xray tunnel argo-watch; do
         if [ -f "$b/retired-$s" ]; then cp -p "$b/retired-$s" "$init_dir/$s"; fi
         if [ -f "$b/retired-$s.service" ]; then cp -p "$b/retired-$s.service" "$systemd_dir/$s.service"; fi
@@ -609,7 +621,10 @@ upgrade_installation() (
     generate_subscription || return 1
     write_nginx_config && nginx -t -c "$work_dir/nginx.conf" >/dev/null 2>&1 || return 1
     # 到这里配置已全部验证，才交接监听端口。
-    if [ ! -f "$work_dir/.caddy-retired" ] && [ -f /etc/caddy/Caddyfile ] && legacy_owned /etc/caddy/Caddyfile; then stop_owned_caddy || return 1; fi
+    if [ ! -f "$work_dir/.caddy-retired" ] && [ -f /etc/caddy/Caddyfile ]; then
+        check_caddy_owned /etc/caddy/Caddyfile || { red '检测到共享或未知 Caddy 配置，拒绝自动交接';return 1; }
+        stop_owned_caddy || return 1
+    fi
     legacy_retire || return 1
     install_runtime_copy || return 1
     configure_services || return 1
@@ -619,7 +634,33 @@ upgrade_installation() (
     green '迁移完成：原订阅端口、路径和认证已保留。NAT 映射无需改变。'
 )
 
-install_fresh() {
+validate_install_ports() {
+    local p
+    [ "$(printf '%s\n' "$@" 3001 3002 3003 | sort -u | wc -l)" -eq 7 ] || { red '所选端口冲突，3001–3003 为内部回落保留端口';return 1; }
+    for p in "$@" 3001 3002 3003;do port_available "$p" || { red '安装端口无效或已占用';return 1; };done
+}
+cleanup_failed_install() {
+    [ -f "$work_dir/.installing" ] || return 1
+    local s f retired
+    for s in xray2go-sync xray2go-sub xray2go-tunnel xray2go-core;do
+        if is_openrc;then f="$init_dir/$s";else f="$systemd_dir/$s.service";fi
+        if [ -f "$f" ];then
+            grep -Fq 'Managed by shadowxhero/xray-2go' "$f" || return 1
+            service_action "$s" stop || true
+            stop_owned_processes "${s#xray2go-}" || return 1
+            service_disable "$s";rm -f "$f"
+        fi
+    done
+    if [ -e "$work_dir/shortcut-before" ] || [ -L "$work_dir/shortcut-before" ];then
+        rm -f "$shortcut_path";cp -a "$work_dir/shortcut-before" "$shortcut_path"
+    elif [ -f "$shortcut_path" ] && grep -Fq /etc/xray/runtime.sh "$shortcut_path";then rm -f "$shortcut_path";fi
+    [ -d "$archive_root" ] && [ ! -L "$work_dir" ] || return 1
+    retired=$(mktemp -d "$archive_root/xray2go-failed-install-XXXXXX") || return 1
+    chmod 700 "$retired";rmdir "$retired";mv "$work_dir" "$retired";chmod 700 "$retired"
+    red '安装未完成，已停止本次服务并归档半安装文件，可重新安装。'
+}
+install_fresh() (
+    set -e
     [ ! -e "$config_dir" ] || { red '已有配置，请使用 --upgrade，避免覆盖认证信息'; return 1; }
     install_dependencies || return 1
     mkdir -p "$work_dir"; chmod 711 "$work_dir"; umask 077
@@ -629,8 +670,12 @@ install_fresh() {
         i386|i686) arch=386; xr=32;; armv7l) arch=arm; xr=arm32-v7a;; *) red '不支持的 CPU 架构';return 1;;
     esac
     subp=${PORT:-$(shuf -i 10000-60000 -n 1)}; rawp=${RAW_PORT:-$((subp+1))}; xhp=${XHTTP_PORT:-$((subp+2))}; ap=${ARGO_PORT:-8080}
-    for output in "$subp" "$rawp" "$xhp" "$ap"; do port_available "$output" || { red '安装端口无效或占用'; return 1; }; done
-    [ "$(printf '%s\n' "$subp" "$rawp" "$xhp" "$ap" | sort -u | wc -l)" -eq 4 ] || return 1
+    validate_install_ports "$subp" "$rawp" "$xhp" "$ap" || return 1
+    local s
+    for s in "${SERVICES[@]}";do [ ! -e "$init_dir/$s" ] && [ ! -e "$systemd_dir/$s.service" ] || { red '存在同名服务，拒绝覆盖';return 1; };done
+    touch "$work_dir/.installing"
+    if [ -e "$shortcut_path" ] || [ -L "$shortcut_path" ];then cp -a "$shortcut_path" "$work_dir/shortcut-before";fi
+    trap 'r=$?; if [ "$r" -ne 0 ];then cleanup_failed_install || true;fi' EXIT
     curl -fSL --retry 2 'https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-'"$xr"'.zip' -o "$work_dir/core.zip" || return 1
     unzip -oq "$work_dir/core.zip" xray -d "$work_dir" || return 1
     curl -fSL --retry 2 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-'"$arch" -o "$work_dir/argo" || return 1
@@ -645,9 +690,10 @@ install_fresh() {
     generate_subscription; write_nginx_config
     nginx -t -c "$work_dir/nginx.conf" >/dev/null 2>&1 || return 1
     install_runtime_copy && configure_services && start_services || return 1
-    touch "$work_dir/.installed"
+    touch "$work_dir/.installed";rm -f "$work_dir/.installing"
+    trap - EXIT
     green '安装完成。NAT 机器须映射订阅和两个直连 TCP 端口；Argo 无需映射内部端口。'
-}
+)
 
 tunnel_transaction() (
     local b f r
@@ -736,8 +782,8 @@ uninstall_owned() {
     done
     stop_legacy_sync_processes
     if ! is_openrc; then systemctl daemon-reload; fi
-    if [ -f /usr/bin/2go ] && grep -Fq /etc/xray/runtime.sh /usr/bin/2go; then rm -f /usr/bin/2go; fi
-    local retired="/root/xray2go-uninstalled-$(date +%Y%m%d-%H%M%S)"
+    if [ -f "$shortcut_path" ] && grep -Fq /etc/xray/runtime.sh "$shortcut_path"; then rm -f "$shortcut_path"; fi
+    local retired="$archive_root/xray2go-uninstalled-$(date +%Y%m%d-%H%M%S)"
     [ "$(readlink -f "$work_dir")" = /etc/xray ] && [ ! -e "$retired" ] || return 1
     mv "$work_dir" "$retired"; chmod 700 "$retired"
     green '服务、开机项已移除；配置和密钥已归档到 root 目录，不再有后台进程。'

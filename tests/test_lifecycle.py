@@ -168,6 +168,21 @@ validate_xray_config() { jq -e '.inbounds|length>0' "$1" >/dev/null; }
         self.assertEqual(before, (self.home/'state.json').read_bytes())
         self.assertEqual((self.home/'tunnel.token').read_text(), 'good-fixture-token')
 
+    def test_http_success_without_owned_nginx_is_not_a_healthy_migration(self):
+        self.run_shell('generate_subscription\n')
+        r = self.run_shell('curl() { cp "$work_dir/public/sub.txt" "${@: -1}"; }\nsleep() { :; }\nsubscription_probe\n', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_validation_passes_json_extension_to_real_core_boundary(self):
+        binary = self.home/'xray'
+        binary.write_text('#!/bin/bash\n[[ "$*" == *"-format json"* ]] || exit 1\n[[ "${@: -1}" == *.json ]] || exit 23\njq -e . "${@: -1}" >/dev/null\n')
+        binary.chmod(0o700)
+        (self.home/'candidate-no-extension').write_text(json.dumps(self.config))
+        r = subprocess.run(['bash','-c','source "$SCRIPT"; work_dir="$CASE/home"; validate_xray_config "$work_dir/candidate-no-extension"'],
+            env={**os.environ,'SCRIPT':str(SCRIPT),'CASE':str(self.d)},capture_output=True,text=True)
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertEqual(list(self.home.glob('.validate.*')),[])
+
     def test_upgrade_failure_restores_previous_files(self):
         self.run_shell('generate_subscription\nwrite_nginx_config\n')
         before = {n:(self.home/n).read_bytes() for n in ('state.json','config.json','url.txt','sub.txt')}
@@ -187,6 +202,52 @@ upgrade_installation
         self.assertNotEqual(r.returncode, 0)
         for n,b in before.items(): self.assertEqual((self.home/n).read_bytes(), b, n)
 
+    def test_rollback_restores_shortcut_and_removes_new_runtime(self):
+        shortcut = self.d/'2go'
+        shortcut.write_text('#!/bin/sh\necho legacy\n')
+        self.run_shell('''
+shortcut_path="$CASE/2go"
+service_status() { return 1; }
+service_enabled() { return 1; }
+service_action() { return 0; }
+service_disable() { :; }
+is_openrc() { return 0; }
+backup_installation
+b=$(cat "$work_dir/last-backup")
+printf 'new runtime' > "$work_dir/runtime.sh"
+printf 'new helper' > "$work_dir/sync-loop.sh"
+printf 'new shortcut' > "$shortcut_path"
+rollback_upgrade "$b"
+''')
+        self.assertEqual(shortcut.read_text(), '#!/bin/sh\necho legacy\n')
+        self.assertFalse((self.home/'runtime.sh').exists())
+        self.assertFalse((self.home/'sync-loop.sh').exists())
+
+    def test_internal_fallback_ports_are_reserved_during_install(self):
+        r = self.run_shell('validate_install_ports 43013 43011 43012 3001\n', ok=False)
+        self.assertNotEqual(r.returncode,0)
+        r = self.run_shell('validate_install_ports 43013 3002 43012 8080\n', ok=False)
+        self.assertNotEqual(r.returncode,0)
+        self.run_shell('port_available() { [ "$1" != 3003 ]; }\nif validate_install_ports 43013 43011 43012 8080; then exit 1;fi\n')
+
+    def test_failed_install_removes_owned_services_and_archives_partial_files(self):
+        self.run_shell('''
+archive_root="$CASE/archive"
+mkdir -p "$archive_root"
+touch "$work_dir/.installing"
+is_openrc() { return 0; }
+for s in "${SERVICES[@]}"; do printf '# Managed by shadowxhero/xray-2go\\n' > "$init_dir/$s"; done
+service_action() { :; }
+service_disable() { :; }
+stop_owned_processes() { :; }
+cleanup_failed_install
+''')
+        self.assertFalse(self.home.exists())
+        self.assertEqual(list((self.d/'init.d').iterdir()),[])
+        archives=list((self.d/'archive').glob('xray2go-failed-install-*'))
+        self.assertEqual(len(archives),1)
+        self.assertTrue((archives[0]/'config.json').exists())
+
     def test_failed_legacy_import_leaves_no_partial_state(self):
         (self.home / 'state.json').unlink()
         vm = base64.b64encode(json.dumps({'add': 'cdn.example.com', 'port': '443', 'ps': 'Legacy', 'host': 'fixed.example.com'}).encode()).decode()
@@ -201,7 +262,7 @@ upgrade_installation
         r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
             env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '2.0.0')
+        self.assertEqual(r.stdout.strip(), '2.0.3')
 
     def test_caddy_migration_rejects_unrelated_websites(self):
         cf = self.d / 'Caddyfile'
