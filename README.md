@@ -1,4 +1,4 @@
-# Xray-2go v2.0.3
+# Xray-2go v2.0.4
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -12,6 +12,8 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xray_2go.sh)
 ```
+
+菜单恢复彩色分组并按安装状态显示：未安装时只有安装/帮助/退出；旧版显示迁移；新版安装完整后才显示节点和服务管理。服务区分未安装、运行中、已停止，配置缺失会显示安装不完整。检测到 ArgoX 时提示避免覆盖，不将它视为本项目安装。
 
 菜单选择「新安装」。也可无交互安装：
 
