@@ -313,7 +313,7 @@ cleanup_failed_install
         r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
             env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '2.0.6')
+        self.assertEqual(r.stdout.strip(), '2.0.7')
 
     def test_caddy_migration_rejects_unrelated_websites(self):
         cf = self.d / 'Caddyfile'

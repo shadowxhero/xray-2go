@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.6 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.0.7 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.6
+SCRIPT_VERSION=2.0.7
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -550,6 +550,45 @@ install_dependencies() {
     elif command_exists yum; then yum install -y jq curl unzip openssl nginx iproute
     else red '不支持的软件包管理器'; return 1; fi
 }
+fetch_latest_script() {
+    curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xray_2go.sh -o "$1"
+}
+validate_script_download() {
+    local file=$1 version
+    bash -n "$file" || return 1
+    version=$(sed -nE 's/^SCRIPT_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$file")
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    # 不 source/执行下载内容；这里只检查格式，来源信任仍依赖官方仓库 HTTPS。
+    grep -q '^# Xray-2go ' "$file" && grep -q '^main() {' "$file" && grep -q '^upgrade_installation() (' "$file" && grep -Fq 'SERVICES=(xray2go-core xray2go-tunnel xray2go-sub xray2go-sync)' "$file" || return 1
+    printf '%s\n' "$version"
+}
+online_update() {
+    [ -f "$work_dir/.installed" ] && [ -s "$work_dir/runtime.sh" ] || { red '请先安装或迁移本项目，再在线更新。';return 1; }
+    local staged result=0
+    staged=$(mktemp "$work_dir/.online-update.XXXXXX") || return 1
+    chmod 600 "$staged"
+    if ! fetch_latest_script "$staged";then rm -f "$staged";red '下载失败，原脚本未变。';return 1;fi
+    with_lock apply_script_update "$staged" || result=$?
+    rm -f "$staged"
+    return "$result"
+}
+apply_script_update() {
+    local candidate=$1 version current newer backup
+    version=$(validate_script_download "$candidate") || { red '下载内容不是有效的 Xray-2go 脚本，原脚本未变。';return 1; }
+    current=$(sed -nE 's/^SCRIPT_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$work_dir/runtime.sh")
+    [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { red '无法确认本机版本，停止更新。';return 1; }
+    newer=$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)
+    [ "$newer" = "$version" ] || { red "远端版本 $version 比本机 $current 旧，拒绝降级。";return 1; }
+    if cmp -s "$candidate" "$work_dir/runtime.sh";then green "本机已经是最新脚本 v$current，无需更新。";return 0;fi
+    mkdir -p "$work_dir/backups" || return 1
+    backup=$(mktemp -d "$work_dir/backups/script-update-XXXXXX") || return 1
+    chmod 700 "$work_dir/backups" "$backup"
+    cp -p "$work_dir/runtime.sh" "$backup/runtime.sh" || return 1
+    chmod 700 "$candidate"
+    mv -f "$candidate" "$work_dir/runtime.sh" || return 1
+    green "脚本已从 v$current 更新到 v$version。配置和内核未变，服务未重启。"
+    green '请退出当前菜单后重新运行 2go；需要重建服务时再选择“修复当前服务”。'
+}
 install_runtime_copy() {
     if [ "$SELF" != "$work_dir/runtime.sh" ]; then cp "$SELF" "$work_dir/runtime.sh"; fi
     chmod 700 "$work_dir/runtime.sh"
@@ -893,7 +932,7 @@ menu_option_allowed() {
     local status=$1 choice=$2
     case "$choice" in 0|h|H) return 0;;esac
     case "$status:$choice" in
-        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16) return 0;;
+        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16|installed:17) return 0;;
         partial:2) [ -x "$work_dir/xray" ] && [ -s "$config_dir" ] && [ -s "$client_dir" ];return $?;;
         *) return 1;;
     esac
@@ -908,7 +947,8 @@ render_menu() {
         partial)
             if menu_option_allowed partial 2;then menu_color 33 '2. 修复/迁移现有安装（先备份）';else menu_color 33 '配置或内核缺失，暂不提供修改/卸载入口，请先检查安装记录。';fi;;
         installed)
-            menu_color 32 '2. 升级/修复服务（保留配置）'
+            menu_color 32 '2. 在线更新脚本（不重启服务）'
+            menu_color 32 '17. 修复当前服务（本机版本，保留配置）'
             menu_color 32 '3. 查看节点与订阅'
             menu_color 32 '4. 修改节点名称'
             menu_separator
@@ -1135,7 +1175,10 @@ menu() {
         fi
         case "$choice" in
             1) install_fresh ;;
-            2) upgrade_installation ;;
+            2) if [ "$status" = installed ];then
+                   if online_update;then green '重新运行 2go 进入更新后的菜单。';return 0;fi
+               else upgrade_installation;fi ;;
+            17) upgrade_installation ;;
             3) show_nodes ;;
             4) reading '基础名：' value && with_lock rename_nodes "$value" && { green '节点名称已更新。';show_nodes; } ;;
             5|6) network=raw; [ "$choice" != 6 ] || network=xhttp; interactive_port "$network" ;;
@@ -1162,15 +1205,16 @@ rename_nodes() { [ -n "$1" ] && state_string name "$1" && generate_subscription_
 main() {
     case "${1:-}" in
         --version) printf '%s\n' "$SCRIPT_VERSION"; return;;
-        -h|--help) printf '2go [-i|--install] [--upgrade] [-c|--check] [-r|--restart] [-u|--uninstall] [--sync] [--version]\n--upgrade 保留端口、订阅路径、UUID、密钥和固定隧道；不会重新下载内核。\n';return;;
+        -h|--help) printf '2go [-i|--install] [--update] [--repair|--upgrade] [-c|--check] [-r|--restart] [-u|--uninstall] [--sync] [--version]\n--update 下载并保存 GitHub 最新脚本，不重启服务或更新内核。\n--repair/--upgrade 使用当前运行版本修复或迁移服务，保留配置，可能重启服务。\n';return;;
     esac
     require_root || return 1
     case "${1:-}" in
-        -i|--install|--upgrade|'') resolve_self || return 1;;
+        -i|--install|--repair|--upgrade|'') resolve_self || return 1;;
     esac
     case "${1:-}" in
         -i|--install) install_fresh;;
-        --upgrade) upgrade_installation;;
+        --update) online_update;;
+        --repair|--upgrade) upgrade_installation;;
         -c|--check) show_nodes;;
         -r|--restart) renew_tunnel;;
         -u|--uninstall) uninstall_owned;;
