@@ -966,12 +966,14 @@ if [ ${check_xray} -eq 0 ]; then
         3)
             reading "请输入新的订阅端口(1-65535):" sub_port
             [ -z "$sub_port" ] && sub_port=$(shuf -i 2000-65000 -n 1)
-            until [[ -z $(lsof -iTCP:$sub_port -sTCP:LISTEN 2>/dev/null) ]]; do
-                if [[ -n $(lsof -iTCP:$sub_port -sTCP:LISTEN 2>/dev/null) ]]; then
-                    echo -e "${red}${new_port}端口已经被其他程序占用，请更换端口重试${re}"
-                    reading "请输入新的订阅端口(1-65535):" sub_port
-                    [[ -z $sub_port ]] && sub_port=$(shuf -i 2000-65000 -n 1)
-                fi
+            until [[ "$sub_port" =~ ^[0-9]+$ && "$sub_port" -ge 1 && "$sub_port" -le 65535 ]] || { red "端口必须是 1-65535"; false; }; do
+                reading "请输入新的订阅端口(1-65535):" sub_port
+            done
+            current_sub_port=$(awk '/^[0-9]/{print $1; exit}' /etc/caddy/Caddyfile)
+            until [ "$sub_port" = "$current_sub_port" ] || ! ss -H -ltn "sport = :$sub_port" 2>/dev/null | grep -q .; do
+                red "${sub_port}端口已经被其他程序占用，请更换端口重试"
+                reading "请输入新的订阅端口(1-65535):" sub_port
+                [ -z "$sub_port" ] && sub_port=$(shuf -i 2000-65000 -n 1)
             done
             sed -i "s/:[0-9]\+/:$sub_port/g" /etc/caddy/Caddyfile
             path=$(sed -n 's/.*handle \/\([^ ]*\).*/\1/p' /etc/caddy/Caddyfile)
