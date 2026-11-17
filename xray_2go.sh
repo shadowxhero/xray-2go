@@ -173,7 +173,7 @@ install_xray() {
 
    # 生成随机UUID和密码
     password=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c 24)
-    GRPC_PORT=$(($PORT + 1))
+    RAW_PORT=$(($PORT + 1))
     XHTTP_PORT=$(($PORT + 2))
 
     # 关闭防火墙
@@ -225,9 +225,9 @@ cat > "${config_dir}" << EOF
       ["www.nazhumi.com"],"privateKey": "$private_key","shortIds": [""]}},"sniffing": {"enabled": true,"destOverride": ["http","tls","quic"]}
     },
     {
-      "listen":"::","port":$GRPC_PORT,"protocol":"vless","settings":{"clients":[{"id":"$UUID"}],"decryption":"none"},
-      "streamSettings":{"network":"grpc","security":"reality","realitySettings":{"dest":"www.iij.ad.jp:443","serverNames":["www.iij.ad.jp"],
-      "privateKey":"$private_key","shortIds":[""]},"grpcSettings":{"serviceName":"grpc"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"]}
+      "listen":"::","port":$RAW_PORT,"protocol":"vless","settings":{"clients":[{"id":"$UUID","flow":"xtls-rprx-vision"}],"decryption":"none"},
+      "streamSettings":{"network":"raw","security":"reality","realitySettings":{"dest":"www.iij.ad.jp:443","serverNames":["www.iij.ad.jp"],
+      "privateKey":"$private_key","shortIds":[""]}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"]}
     }
   ],
   "dns": { "servers": ["https+local://8.8.8.8/dns-query"] },
@@ -454,7 +454,7 @@ get_info() {
   green "\nArgoDomain：${purple}$argodomain${re}\n"
 
   cat > ${work_dir}/url.txt <<EOF
-vless://${UUID}@${IP}:${GRPC_PORT}??encryption=none&security=reality&sni=www.iij.ad.jp&fp=chrome&pbk=${public_key}&allowInsecure=1&type=grpc&authority=www.iij.ad.jp&serviceName=grpc&mode=gun#${isp}
+vless://${UUID}@${IP}:${RAW_PORT}?encryption=none&security=reality&sni=www.iij.ad.jp&fp=chrome&pbk=${public_key}&type=tcp&headerType=none&flow=xtls-rprx-vision#${isp}
 
 vless://${UUID}@${IP}:${XHTTP_PORT}?encryption=none&security=reality&sni=www.nazhumi.com&fp=chrome&pbk=${public_key}&allowInsecure=1&type=xhttp&mode=auto#${isp}
 
@@ -839,7 +839,7 @@ clear
 echo ""
 green "1. 修改UUID"
 skyblue "------------"
-green "2. 修改grpc-reality端口"
+green "2. 修改raw-reality端口"
 skyblue "------------"
 green "3. 修改xhttp-reality端口"
 skyblue "------------"
@@ -872,16 +872,16 @@ case "${choice}" in
         green "\nUUID已修改为：${purple}${new_uuid}${re} ${green}请更新订阅或手动更改所有节点的UUID${re}\n"
         ;;
     2)
-        reading "\n请输入grpc-reality端口 (回车跳过将使用随机端口): " new_port
+        reading "\n请输入raw-reality端口 (回车跳过将使用随机端口): " new_port
         [ -z "$new_port" ] && new_port=$(shuf -i 2000-65000 -n 1)
         jq --arg port "$new_port" \
-           '(.inbounds[] | select(.streamSettings.network == "grpc").port) = ($port | tonumber)' \
+           '(.inbounds[] | select(.streamSettings.network == "raw").port) = ($port | tonumber)' \
            "$config_dir" > "${config_dir}.tmp" && mv "${config_dir}.tmp" "$config_dir"
         restart_xray
-        sed -i -E '/type=grpc/{s#(vless://[^@]*@[^:]*:)[0-9]+#\1'"$new_port"'#}' "$client_dir"
+        sed -i -E '/flow=xtls-rprx-vision/{s#(vless://[^@]*@[^:]*:)[0-9]+#\1'"$new_port"'#}' "$client_dir"
         base64 -w0 $client_dir > /etc/xray/sub.txt
         while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
-        green "\nGRPC-reality端口已修改成：${purple}$new_port${re} ${green}请更新订阅或手动更改grpc-reality节点端口${re}\n"
+        green "\nRAW-reality端口已修改成：${purple}$new_port${re} ${green}请更新订阅或手动更改raw-reality节点端口${re}\n"
         ;;
     3)
         reading "\n请输入xhttp-reality端口 (回车跳过将使用随机端口): " new_port
