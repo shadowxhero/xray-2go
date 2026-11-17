@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.7 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.0.8 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.7
+SCRIPT_VERSION=2.0.8
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -572,8 +572,22 @@ online_update() {
     rm -f "$staged"
     return "$result"
 }
+refresh_script_on_launch() {
+    # 只在无参数、外部脚本启动且本项目已安装时保存；不触碰旧版迁移或未安装机器。
+    [ -f "$work_dir/.installed" ] && [ -s "$work_dir/runtime.sh" ] || return 0
+    local source_path installed_path staged result=0
+    source_path=$(readlink -f "$SELF") || return 1
+    installed_path=$(readlink -f "$work_dir/runtime.sh") || return 1
+    [ "$source_path" != "$installed_path" ] || return 0
+    staged=$(mktemp "$work_dir/.launch-update.XXXXXX") || return 1
+    chmod 600 "$staged"
+    if ! cp "$SELF" "$staged";then rm -f "$staged";red '无法保存当前脚本，原脚本未变。';return 1;fi
+    with_lock apply_script_update "$staged" launch || result=$?
+    rm -f "$staged"
+    return "$result"
+}
 apply_script_update() {
-    local candidate=$1 version current newer backup
+    local candidate=$1 context=${2:-online} version current newer backup
     version=$(validate_script_download "$candidate") || { red '下载内容不是有效的 Xray-2go 脚本，原脚本未变。';return 1; }
     current=$(sed -nE 's/^SCRIPT_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$work_dir/runtime.sh")
     [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { red '无法确认本机版本，停止更新。';return 1; }
@@ -587,7 +601,8 @@ apply_script_update() {
     chmod 700 "$candidate"
     mv -f "$candidate" "$work_dir/runtime.sh" || return 1
     green "脚本已从 v$current 更新到 v$version。配置和内核未变，服务未重启。"
-    green '请退出当前菜单后重新运行 2go；需要重建服务时再选择“修复当前服务”。'
+    if [ "$context" = launch ];then green '已同步本机脚本，正在进入当前新版菜单。'
+    else green '请退出当前菜单后重新运行 2go；需要重建服务时再选择“修复当前服务”。';fi
 }
 install_runtime_copy() {
     if [ "$SELF" != "$work_dir/runtime.sh" ]; then cp "$SELF" "$work_dir/runtime.sh"; fi
@@ -1220,7 +1235,7 @@ main() {
         -u|--uninstall) uninstall_owned;;
         --sync) sync_subscription;;
         --tunnel-worker) tunnel_worker;;
-        '') menu;;
+        '') refresh_script_on_launch && menu;;
         *) red '未知参数，请用 --help';return 1;;
     esac
 }

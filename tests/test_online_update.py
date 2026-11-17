@@ -99,6 +99,76 @@ main --repair
         self.assertIn('LOCAL_REPAIR_CALLED',r.stdout)
         self.assertNotIn('UNEXPECTED_DOWNLOAD',r.stdout)
 
+    def test_external_one_command_launch_saves_running_script_before_menu(self):
+        r=self.shell('''
+SELF="$CASE/candidate.sh"
+menu() { echo MENU_ENTERED; }
+upgrade_installation() { echo UNEXPECTED_REPAIR;return 1; }
+fetch_latest_script() { echo UNEXPECTED_DOWNLOAD;return 1; }
+main
+''')
+        self.assertIn('MENU_ENTERED',r.stdout)
+        self.assertNotIn('UNEXPECTED_REPAIR',r.stdout)
+        self.assertNotIn('UNEXPECTED_DOWNLOAD',r.stdout)
+        self.assertEqual((self.home/'runtime.sh').read_bytes(),(self.d/'candidate.sh').read_bytes())
+        self.assertEqual((self.home/'state.json').read_text(),'{"name":"KeepMe"}')
+
+    def test_process_substitution_launch_materializes_and_saves_validated_script(self):
+        r=self.shell('''
+SCRIPT_VERSION=9.0.0
+exec {fd}< <(cat "$CASE/candidate.sh")
+SELF="/dev/fd/$fd"
+curl() { cp "$CASE/candidate.sh" "${@: -1}"; }
+menu() { echo PIPE_MENU_ENTERED; }
+main
+''')
+        self.assertIn('PIPE_MENU_ENTERED',r.stdout)
+        self.assertNotIn('UNEXPECTED_SERVICE_CHANGE',r.stdout)
+        self.assertEqual((self.home/'runtime.sh').read_bytes(),(self.d/'candidate.sh').read_bytes())
+
+    def test_local_launch_does_not_download_or_rewrite_script(self):
+        r=self.shell('''
+SELF="$work_dir/runtime.sh"
+menu() { echo LOCAL_MENU; }
+fetch_latest_script() { echo UNEXPECTED_DOWNLOAD;return 1; }
+main
+''')
+        self.assertIn('LOCAL_MENU',r.stdout)
+        self.assertNotIn('UNEXPECTED_DOWNLOAD',r.stdout)
+        self.assertFalse((self.home/'backups').exists())
+
+    def test_uninstalled_external_launch_only_opens_installation_menu(self):
+        (self.home/'.installed').unlink()
+        r=self.shell('''
+SELF="$CASE/candidate.sh"
+menu() { echo INSTALL_MENU; }
+install_fresh() { echo UNEXPECTED_INSTALL;return 1; }
+main
+''')
+        self.assertIn('INSTALL_MENU',r.stdout)
+        self.assertNotIn('UNEXPECTED_INSTALL',r.stdout)
+        self.assertEqual((self.home/'runtime.sh').read_bytes(),self.old)
+
+    def test_older_external_launch_cannot_replace_newer_runtime_or_open_old_menu(self):
+        candidate=(self.d/'candidate.sh').read_text().replace('SCRIPT_VERSION=9.0.0','SCRIPT_VERSION=0.0.1')
+        (self.d/'candidate.sh').write_text(candidate)
+        r=self.shell('SELF="$CASE/candidate.sh"\nmenu() { echo UNEXPECTED_MENU; }\nmain\n',ok=False)
+        self.assertNotEqual(r.returncode,0)
+        self.assertNotIn('UNEXPECTED_MENU',r.stdout)
+        self.assertEqual((self.home/'runtime.sh').read_bytes(),self.old)
+
+    def test_invalid_external_launch_keeps_runtime_and_does_not_open_menu(self):
+        (self.d/'candidate.sh').write_text('#!/bin/bash\necho unrelated\n')
+        r=self.shell('SELF="$CASE/candidate.sh"\nmenu() { echo UNEXPECTED_MENU; }\nmain\n',ok=False)
+        self.assertNotEqual(r.returncode,0)
+        self.assertNotIn('UNEXPECTED_MENU',r.stdout)
+        self.assertEqual((self.home/'runtime.sh').read_bytes(),self.old)
+
+    def test_explicit_read_only_action_does_not_trigger_startup_update(self):
+        r=self.shell('SELF="$CASE/candidate.sh"\nshow_nodes() { echo CHECK_ONLY; }\nmain --check\n')
+        self.assertIn('CHECK_ONLY',r.stdout)
+        self.assertEqual((self.home/'runtime.sh').read_bytes(),self.old)
+
     def test_absent_installation_cannot_be_updated(self):
         (self.home/'.installed').unlink()
         r=self.shell('online_update\n',ok=False)
