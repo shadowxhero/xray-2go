@@ -183,6 +183,24 @@ validate_xray_config() { jq -e '.inbounds|length>0' "$1" >/dev/null; }
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(list(self.home.glob('.validate.*')),[])
 
+    def test_cdn_change_rebuilds_both_argo_nodes_without_changing_direct_nodes(self):
+        self.run_shell('generate_subscription\n')
+        direct=self.nodes()[:2]
+        self.run_shell('set_cdn 2001:db8::7 8443\n')
+        ns=self.nodes()
+        self.assertEqual(ns[:2],direct)
+        ws=urlsplit(ns[2]);self.assertEqual(ws.hostname,'2001:db8::7');self.assertEqual(ws.port,8443)
+        vm=json.loads(base64.b64decode(ns[3][8:]));self.assertEqual(vm['add'],'2001:db8::7');self.assertEqual(vm['port'],'8443')
+        self.assertEqual(vm['host'],'old.trycloudflare.com')
+
+    def test_sni_change_only_updates_selected_transport(self):
+        original=self.config['inbounds'][2]
+        self.run_shell('set_sni xhttp changed.example.com\n')
+        cfg=json.loads((self.home/'config.json').read_text())
+        self.assertEqual(cfg['inbounds'][2],original)
+        self.assertEqual(cfg['inbounds'][0]['streamSettings']['realitySettings']['serverNames'],['changed.example.com'])
+        self.assertEqual(parse_qs(urlsplit(self.nodes()[1]).query)['sni'],['changed.example.com'])
+
     def test_retired_caddy_config_without_service_is_safe_to_skip(self):
         r=self.run_shell('''
 check_caddy_owned() { return 0; }
@@ -295,7 +313,7 @@ cleanup_failed_install
         r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
             env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '2.0.5')
+        self.assertEqual(r.stdout.strip(), '2.0.6')
 
     def test_caddy_migration_rejects_unrelated_websites(self):
         cf = self.d / 'Caddyfile'

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.5 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.0.6 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.5
+SCRIPT_VERSION=2.0.6
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -725,6 +725,10 @@ install_fresh() (
     touch "$work_dir/.installed";rm -f "$work_dir/.installing"
     trap - EXIT
     green '安装完成。NAT 机器须映射订阅和两个直连 TCP 端口；Argo 无需映射内部端口。'
+    local wait_domain
+    for wait_domain in {1..10};do sync_subscription || true;[ -n "$(state tunnel_domain || true)" ] && break;sleep 1;done
+    if [ -z "$(state tunnel_domain || true)" ];then menu_color 33 '临时域名尚未取得，两个 Argo 节点暂不可用；同步器取得后会自动更新。';fi
+    show_nodes
 )
 
 tunnel_transaction() (
@@ -820,11 +824,27 @@ uninstall_owned() {
     mv "$work_dir" "$retired"; chmod 700 "$retired"
     green '服务、开机项已移除；配置和密钥已归档到 root 目录，不再有后台进程。'
 }
+subscription_url() {
+    printf 'http://%s:%s/%s' "$(host_uri "$(state server)")" "$(state subscription_port)" "$(state subscription_path)"
+}
 show_nodes() {
-    [ -f "$client_dir" ] || return 1
-    cat "$client_dir"
-    printf '\n订阅：http://%s:%s/%s\n' "$(host_uri "$(state server)")" "$(state subscription_port)" "$(state subscription_path)"
-    printf 'NAT：订阅端口必须在服务商面板映射；服务器内本机 HTTP 成功不代表公网已映射。\n'
+    [ -f "$client_dir" ] || { red '节点信息文件不存在，请先安装或修复。';return 1; }
+    local line link
+    menu_color 32 '=== 当前节点信息 ==='
+    printf '\n'
+    while IFS= read -r line || [ -n "$line" ];do
+        [ -n "$line" ] || continue
+        menu_color 35 "$line";printf '\n'
+    done < "$client_dir"
+    menu_separator
+    menu_color 32 '=== 订阅链接 ==='
+    menu_color 32 'V2rayN / Shadowrocket 等兼容客户端：'
+    link=$(subscription_url);menu_color 35 "$link";printf '\n'
+    if [ -x "$work_dir/qrencode" ];then "$work_dir/qrencode" "$link" || menu_color 33 '二维码生成失败，仍可复制订阅地址。'
+    elif command_exists qrencode;then qrencode -t ANSIUTF8 "$link" || menu_color 33 '二维码生成失败，仍可复制订阅地址。';fi
+    if ! jq -e .subscription_enabled "$state_file" >/dev/null;then menu_color 33 '当前订阅服务已关闭，开启后才能下载。';fi
+    menu_color 33 'NAT：订阅端口必须在服务商面板映射；本机 HTTP 成功不代表公网已映射。'
+    menu_color 33 'RAW/XHTTP 请使用支持对应传输及新版 REALITY 的客户端内核。'
 }
 menu_color() { printf '\033[1;%sm%s\033[0m\n' "$1" "$2"; }
 menu_separator() { menu_color 36 '----------------------------------------'; }
@@ -912,6 +932,194 @@ render_menu() {
     menu_color 31 '0. 退出'
     menu_separator
 }
+# 2026-11-18：来自 eooce/Sing-box 与 fscarmen/ArgoX，去重后两地实际 WS 101 验证。
+EDGE_PRESETS=(cf.090227.xyz cf.877774.xyz cf.877771.xyz cdns.doon.eu.org time.is skk.moe ip.sb xn--b6gac.eu.org)
+SNI_PRESETS=(www.iij.ad.jp www.nazhumi.com bgk.jp www.joom.com www.stengg.com)
+random_port_candidate() { shuf -i 2000-65000 -n 1; }
+port_candidate_usable() {
+    local p=$1 current=${2:-0}
+    valid_port "$p" || return 1
+    p=$((10#$p))
+    [[ "$p" != 3001 && "$p" != 3002 && "$p" != 3003 ]] || return 1
+    if [ "$p" = "$current" ];then return 0;fi
+    if jq -e --argjson p "$p" 'any(.inbounds[]; .port==$p)' "$config_dir" >/dev/null 2>&1;then return 1;fi
+    [ "$p" != "$(state subscription_port)" ] || return 1
+    [ "$p" != "$(state argo_port)" ] || return 1
+    port_available "$p"
+}
+prompt_port() {
+    local label=$1 current=${2:-0} value n
+    while true;do
+        reading "$label（1–65535；回车随机生成）：" value || return 1
+        if [ -z "$value" ];then
+            for ((n=0;n<100;n++));do
+                value=$(random_port_candidate)
+                if [ "$value" != "$current" ] && port_candidate_usable "$value" "$current";then
+                    REPLY=$((10#$value));menu_color 32 "随机选择端口：$REPLY";return 0
+                fi
+            done
+            red '尝试 100 次仍未找到可用端口，请手动输入。';return 1
+        fi
+        if port_candidate_usable "$value" "$current";then REPLY=$((10#$value));return 0;fi
+        red '端口无效、已占用或被当前配置保留，请重新输入。'
+    done
+}
+interactive_port() {
+    local kind=$1 current selected
+    case "$kind" in
+        raw|xhttp) current=$(jq -er --arg n "$kind" '.inbounds[]|select(.streamSettings.security=="reality" and (.streamSettings.network==$n or ($n=="raw" and .streamSettings.network=="tcp")))|.port' "$config_dir") || return 1;;
+        sub) current=$(state subscription_port);;
+        argo) current=$(state argo_port);;
+        *) return 1;;
+    esac
+    menu_color 32 "当前端口：$current"
+    prompt_port '请输入新端口' "$current" || return 1;selected=$REPLY
+    case "$kind" in raw|xhttp) set_direct_port "$kind" "$selected";;sub) set_subscription_port "$selected";;argo) set_argo_port "$selected";;esac || { red '端口修改失败，请检查上方提示。';return 1; }
+    green "端口已设置为 $selected，原认证信息不变。"
+    if [ "$kind" = sub ];then menu_color 35 "$(subscription_url)";else show_nodes;fi
+    [ "$kind" = argo ] || menu_color 33 'NAT 机器请确认此端口在服务商允许范围内，并配置对应 TCP 映射。'
+}
+parse_edge_input() {
+    local value=$1 host port=443 index
+    if [ -z "$value" ];then EDGE_HOST=$(state cdn);EDGE_PORT=$(state cdn_port);return 0;fi
+    if [[ "$value" =~ ^[0-9]{1,2}$ ]];then
+        index=$((10#$value));((index>=1 && index<=${#EDGE_PRESETS[@]})) || return 1
+        host=${EDGE_PRESETS[$((index-1))]}
+    elif [[ "$value" =~ ^\[([0-9a-fA-F:]+)\](:([0-9]+))?$ ]];then
+        host=${BASH_REMATCH[1]};port=${BASH_REMATCH[3]:-443}
+    elif [[ "$value" != *:* ]];then host=$value
+    elif [[ "$value" =~ ^([^:]+):([0-9]+)$ ]];then host=${BASH_REMATCH[1]};port=${BASH_REMATCH[2]}
+    else return 1;fi
+    valid_host "$host" && valid_port "$port" || return 1
+    if [[ "$host" == *:* ]];then valid_ipv6 "$host" || return 1
+    elif [[ "$host" =~ ^[0-9.]+$ ]];then valid_ipv4 "$host" || return 1;fi
+    [[ "$host" != *..* ]] || return 1
+    EDGE_HOST=$host;EDGE_PORT=$((10#$port))
+}
+interactive_cdn() {
+    local value i
+    menu_color 32 '=== Argo 优选地址 ==='
+    menu_color 33 "当前：$(host_uri "$(state cdn)"):$(state cdn_port)"
+    for i in "${!EDGE_PRESETS[@]}";do menu_color 32 "$((i+1)). ${EDGE_PRESETS[$i]}:443";done
+    menu_color 33 '预设为测试当时可用，不代表所有线路最快；选择后仍需客户端实测。'
+    while true;do
+        reading '输入编号/域名/IPv4/[IPv6]:端口（回车保持当前）：' value || return 1
+        if parse_edge_input "$value";then break;fi
+        red '地址格式错误，请重新输入；IPv6 带端口时必须使用方括号。'
+    done
+    set_cdn "$EDGE_HOST" "$EDGE_PORT" || { red '优选地址修改失败。';return 1; }
+    green "两个 Argo 节点优选地址已更新为 $(host_uri "$EDGE_HOST"):$EDGE_PORT"
+    show_nodes
+}
+interactive_sni() {
+    local choice network value i host
+    menu_color 32 '=== 修改 Reality SNI ==='
+    menu_color 32 '1. RAW-Reality';menu_color 32 '2. XHTTP-Reality';menu_color 35 '0. 返回'
+    reading '选择：' choice || return 1
+    case "$choice" in 1) network=raw;;2) network=xhttp;;0) return 0;;*) red '无效选项';return 0;;esac
+    for i in "${!SNI_PRESETS[@]}";do menu_color 32 "$((i+1)). ${SNI_PRESETS[$i]}";done
+    menu_color 33 '这些是域名候选，不保证都适合当前机房；目标需要支持 TLS 1.3。'
+    reading '编号或自定义 SNI（回车默认 1）：' value || return 1
+    value=${value:-1}
+    if [[ "$value" =~ ^[0-9]{1,2}$ ]];then
+        ((10#$value>=1 && 10#$value<=${#SNI_PRESETS[@]})) || { red '编号无效';return 1; }
+        host=${SNI_PRESETS[$((10#$value-1))]}
+    else host=$value;fi
+    set_sni "$network" "$host" || { red 'SNI 修改失败。';return 1; }
+    green "$network 的 SNI 已更新为 $host";show_nodes
+}
+interactive_services() {
+    local choice name action
+    menu_color 32 '=== 服务管理 ==='
+    menu_color 32 '1. Xray';menu_color 32 '2. Argo';menu_color 32 '3. Nginx 订阅';menu_color 32 '4. 订阅同步';menu_color 35 '0. 返回'
+    reading '选择服务：' choice || return 1
+    case "$choice" in 1) name=core;;2) name=tunnel;;3) name=sub;;4) name=sync;;0) return 0;;*) red '无效选项';return 0;;esac
+    menu_color 32 '1. 启动';menu_color 32 '2. 停止';menu_color 32 '3. 重启';menu_color 35 '0. 返回'
+    reading '选择操作：' choice || return 1
+    case "$choice" in 1) action=start;;2) action=stop;;3) action=restart;;0) return 0;;*) red '无效选项';return 0;;esac
+    if [ "$name" = sub ] && [ "$action" != stop ] && ! jq -e .subscription_enabled "$state_file" >/dev/null;then
+        red '订阅已关闭，请通过“管理订阅”开启，避免状态与自启配置不一致。';return 0
+    fi
+    service_action "xray2go-$name" "$action" || { red '服务操作失败。';return 1; }
+    green "服务 $name 已执行 $action。主动停止不会被同步器拉起。"
+}
+interactive_subscription() {
+    local choice
+    menu_color 32 '=== 管理订阅 ==='
+    menu_color 32 '1. 开启订阅（保留原路径）';menu_color 32 '2. 关闭订阅';menu_color 32 '3. 修改订阅端口';menu_color 32 '4. 重启订阅服务';menu_color 35 '0. 返回'
+    reading '选择：' choice || return 1
+    case "$choice" in
+        1) set_subscription_enabled true && { green '订阅已开启。';menu_color 35 "$(subscription_url)"; };;
+        2) set_subscription_enabled false && green '订阅已关闭并取消订阅服务自启。';;
+        3) interactive_port sub;;
+        4) if ! jq -e .subscription_enabled "$state_file" >/dev/null;then red '订阅已关闭，请先选择开启订阅。';return 0;fi
+           service_action xray2go-sub restart && subscription_probe && green '订阅服务已重启并通过本机内容检查。';;
+        0) return 0;;*) red '无效选项，未改变订阅状态。';;
+    esac
+}
+interactive_tunnel() {
+    local choice domain file
+    menu_color 32 '=== Argo 隧道管理 ==='
+    menu_color 33 "当前模式：$(state tunnel_mode)，本机回源端口：$(state argo_port)"
+    menu_color 32 '1. 启动隧道';menu_color 32 '2. 停止隧道';menu_color 32 '3. 重启隧道';menu_color 32 '4. 添加/更换固定隧道';menu_color 32 '5. 切换临时隧道';menu_color 32 '6. 重新获取临时域名';menu_color 35 '0. 返回'
+    reading '选择：' choice || return 1
+    case "$choice" in
+        1) service_action xray2go-tunnel start;;2) service_action xray2go-tunnel stop;;3) service_action xray2go-tunnel restart;;
+        4)
+            menu_color 32 '1. Token 文件';menu_color 32 '2. JSON 文件';reading '凭据类型：' choice || return 1
+            case "$choice" in 1) choice=token;;2) choice=json;;*) red '无效选项';return 0;;esac
+            reading '固定隧道域名：' domain || return 1;reading '服务器上凭据文件的路径（不要粘贴密钥）：' file || return 1
+            set_tunnel "$choice" "$domain" "$file";;
+        5) set_tunnel quick;;6) renew_tunnel;;0) return 0;;*) red '无效选项';return 0;;
+    esac || { red '隧道操作失败，未确认成功。';return 1; }
+    green '隧道操作已提交。若重新申请临时域名，同步器会自动更新两个 Argo 节点；Cloudflare 限流时不会立即恢复。'
+}
+valid_ipv4() {
+    local v=$1 a part
+    [[ "$v" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS=. read -r -a a <<< "$v"
+    for part in "${a[@]}";do ((10#$part<=255)) || return 1;done
+}
+valid_ipv6() {
+    local value=$1 compact group count=0 compressed=false
+    [[ "$value" =~ ^[0-9a-fA-F:]+$ && "$value" == *:* && "$value" != *:::* ]] || return 1
+    [[ "$value" != :* || "$value" == ::* ]] && [[ "$value" != *: || "$value" == *:: ]] || return 1
+    compact=${value//:/};[[ "$compact" =~ [1-9a-fA-F] ]] || return 1
+    if [[ "$value" == *::* ]];then
+        compressed=true;compact=${value/::/X};[[ "$compact" != *::* ]] || return 1
+    else [[ "$value" != :* && "$value" != *: ]] || return 1;fi
+    local groups=()
+    IFS=: read -r -a groups <<< "$value"
+    for group in "${groups[@]}";do
+        [ -n "$group" ] || continue
+        ((${#group}<=4)) || return 1
+        count=$((count+1))
+    done
+    if [ "$compressed" = true ];then ((count<8));else ((count==8));fi
+}
+fetch_direct_ip() {
+    local family=$1 ip trace
+    [[ "$family" == 4 || "$family" == 6 ]] || return 1
+    ip=$(curl --noproxy '*' "-$family" -fsS --max-time 5 https://api64.ipify.org) || return 1
+    if [ "$family" = 4 ];then valid_ipv4 "$ip" || return 1
+    else valid_ipv6 "$ip" || return 1;fi
+    trace=$(curl --noproxy '*' "-$family" -fsS --max-time 5 https://www.cloudflare.com/cdn-cgi/trace) || { red '无法确认出口是否为 WARP，请改用手动输入实际公网 IP。';return 1; }
+    if ! grep -qx 'warp=off' <<< "$trace";then red '检测到 WARP 或无法确认出口，不能自动用作入站 IP。';return 1;fi
+    REPLY=$ip
+}
+interactive_address() {
+    local choice value
+    menu_color 32 '=== 修改直连节点地址 ==='
+    menu_color 32 '1. 自动获取 IPv4';menu_color 32 '2. 自动获取 IPv6';menu_color 32 '3. 手动输入公网 IP';menu_color 35 '0. 返回'
+    menu_color 33 '只更新直连节点和订阅显示地址，不改变 Argo 优选入口。'
+    reading '选择：' choice || return 1
+    case "$choice" in
+        1|2) if [ "$choice" = 1 ];then value=4;else value=6;fi;fetch_direct_ip "$value" || { red '获取入站地址失败。';return 1; };value=$REPLY;;
+        3) reading '实际公网 IP（不能填 WARP 出口）：' value || return 1;value=$(normalize_host "$value");valid_ipv4 "$value" || valid_ipv6 "$value" || { red 'IP 格式错误';return 1; };;
+        0) return 0;;*) red '无效选项';return 0;;
+    esac
+    set_server_address "$value" || { red '地址修改失败';return 1; };green "直连地址已更新为 $value";show_nodes
+}
 menu_pause() {
     if [ -t 0 ];then read -n 1 -s -r -p $'\033[1;91m按任意键返回主菜单…\033[0m' || true;printf '\n';fi
 }
@@ -929,22 +1137,24 @@ menu() {
             1) install_fresh ;;
             2) upgrade_installation ;;
             3) show_nodes ;;
-            4) reading '基础名：' value; with_lock rename_nodes "$value" ;;
-            5|6) network=raw; [ "$choice" != 6 ] || network=xhttp; reading '新端口：' value; set_direct_port "$network" "$value" ;;
-            7) reading '新订阅端口：' value; set_subscription_port "$value" ;;
-            8) reading '1 开启，0 关闭（不会被自愈自动开启）：' value; if [ "$value" = 1 ];then set_subscription_enabled true;else set_subscription_enabled false;fi ;;
-            9) reading '服务 core/tunnel/sub/sync：' value; reading '操作 start/stop/restart：' choice; case "$value:$choice" in core:start|core:stop|core:restart|tunnel:start|tunnel:stop|tunnel:restart|sub:start|sub:stop|sub:restart|sync:start|sync:stop|sync:restart) service_action "xray2go-$value" "$choice";; *) red '无效操作';; esac ;;
-            10) reading 'quick/token/json/renew：' mode; if [ "$mode" = renew ];then renew_tunnel; elif [ "$mode" = quick ];then set_tunnel quick;else reading '固定隧道域名：' domain; reading '凭据文件路径（不在终端粘贴密钥）：' file;set_tunnel "$mode" "$domain" "$file";fi ;;
-            11) reading '新 UUID（留空随机）：' value; set_uuid "${value:-$(random_uuid)}" ;;
-            12) reading 'raw 或 xhttp：' network; reading 'SNI 域名：' value; set_sni "$network" "$value" ;;
-            13) reading '优选域名/IP：' h; reading '优选端口：' p;set_cdn "$h" "$p" ;;
-            14) reading '实际公网入站 IP（不是 WARP 出口）：' value;set_server_address "$value" ;;
-            15) reading 'Argo 内部新端口：' value;set_argo_port "$value" ;;
+            4) reading '基础名：' value && with_lock rename_nodes "$value" && { green '节点名称已更新。';show_nodes; } ;;
+            5|6) network=raw; [ "$choice" != 6 ] || network=xhttp; interactive_port "$network" ;;
+            7) interactive_port sub ;;
+            8) interactive_subscription ;;
+            9) interactive_services ;;
+            10) interactive_tunnel ;;
+            11) reading '新 UUID（留空随机生成）：' value && set_uuid "${value:-$(random_uuid)}" && { green 'UUID 已更新，请更新客户端订阅。';show_nodes; } ;;
+            12) interactive_sni ;;
+            13) interactive_cdn ;;
+            14) interactive_address ;;
+            15) interactive_port argo ;;
             16) reading '确认卸载本脚本并归档配置？输入 yes：' value;[ "$value" != yes ] || uninstall_owned ;;
             0) return 0 ;;
             h|H) main --help ;;
             *) red '无效选项' ;;
         esac
+        local operation_result=$?
+        if [ "$operation_result" -ne 0 ];then red '操作未完成，请检查以上提示；未确认成功前请勿更新客户端配置。';fi
         menu_pause
     done
 }
