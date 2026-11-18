@@ -214,25 +214,25 @@ stop_owned_caddy
 
     def test_default_name_uses_country_and_isp_with_underscores(self):
         out=self.run_shell('''
-curl() { printf '{"country_code":"US","isp":"Host Papa"}'; }
+curl() { printf '{"country_code":"US","isp":"Example ISP"}'; }
 resolve_node_name
 ''').stdout.strip()
-        self.assertEqual(out,'US-Host_Papa')
+        self.assertEqual(out,'US-Example_ISP')
 
     def test_name_lookup_falls_back_when_first_provider_returns_empty_json(self):
         out=self.run_shell('''
-curl() { case "${@: -1}" in *ip.sb*) echo '{}';; *) echo '{"country_code":"US","org":"HostPapa"}';; esac; }
+curl() { case "${@: -1}" in *ip.sb*) echo '{}';; *) echo '{"country_code":"US","org":"ExampleISP"}';; esac; }
 resolve_node_name
 ''').stdout.strip()
-        self.assertEqual(out,'US-HostPapa')
+        self.assertEqual(out,'US-ExampleISP')
 
     def test_explicit_node_name_never_calls_geolocation(self):
         out=self.run_shell('''
-NODE_NAME=SC-Zenixcloud
+NODE_NAME=Custom-Node
 curl() { echo unexpected >&2;return 1; }
 resolve_node_name
 ''').stdout.strip()
-        self.assertEqual(out,'SC-Zenixcloud')
+        self.assertEqual(out,'Custom-Node')
 
     def test_upgrade_failure_restores_previous_files(self):
         self.run_shell('generate_subscription\nwrite_nginx_config\n')
@@ -313,7 +313,7 @@ cleanup_failed_install
         r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
             env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '2.0.8')
+        self.assertEqual(r.stdout.strip(), '2.0.9')
 
     def test_caddy_migration_rejects_unrelated_websites(self):
         cf = self.d / 'Caddyfile'

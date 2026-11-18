@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.8 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.0.9 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
 
-SCRIPT_VERSION=2.0.8
+SCRIPT_VERSION=2.0.9
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -987,7 +987,7 @@ render_menu() {
     menu_color 31 '0. 退出'
     menu_separator
 }
-# 2026-11-18：来自 eooce/Sing-box 与 fscarmen/ArgoX，去重后两地实际 WS 101 验证。
+# 2026-11-18：合并 eooce/Sing-box 与 fscarmen/ArgoX 预设，经两个网络环境的 TLS/WebSocket 转发验证。
 EDGE_PRESETS=(cf.090227.xyz cf.877774.xyz cf.877771.xyz cdns.doon.eu.org time.is skk.moe ip.sb xn--b6gac.eu.org)
 SNI_PRESETS=(www.iij.ad.jp www.nazhumi.com bgk.jp www.joom.com www.stengg.com)
 random_port_candidate() { shuf -i 2000-65000 -n 1; }
