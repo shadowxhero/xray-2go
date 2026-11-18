@@ -1,4 +1,4 @@
-# Xray-2go v2.0.8
+# Xray-2go v2.0.9
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -18,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 菜单选择「新安装」。也可无交互安装：
 
 ```bash
-PORT=43013 RAW_PORT=43011 XHTTP_PORT=43012 NODE_NAME='美国三网优化 50M' \
+PORT=43013 RAW_PORT=43011 XHTTP_PORT=43012 \
   bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xray_2go.sh) --install
 ```
 
@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 - 先备份，再检查 Xray、Nginx 配置，最后交接端口。
 - 保留订阅端口、路径、UUID、REALITY 私钥/短 ID/SNI、Argo 优选地址及固定 JSON/Token 隧道。
 - 旧 gRPC REALITY 节点转换为 RAW + Vision，原端口不变，客户端须更新订阅。
-- 四节点分别命名为 `基础名-RAW-Reality`、`基础名-XHTTP-Reality`、`基础名-VLESS-Argo`、`基础名-VMess-Argo`。默认基础名沿用 Sing-box 的“国家代码-服务商”（例如 `US-HostPapa`，空格转下划线），查询失败才退回 hostname。`NODE_NAME` 自定义优先。升级保留自定义名，旧版误用当前 hostname 的默认名会重新查询。
+- 四节点分别命名为 `基础名-RAW-Reality`、`基础名-XHTTP-Reality`、`基础名-VLESS-Argo`、`基础名-VMess-Argo`。默认基础名沿用 Sing-box 的“国家代码-服务商”（例如 `US-ExampleISP`，空格转下划线），查询失败才退回 hostname。`NODE_NAME` 自定义优先。升级保留自定义名，旧版误用当前 hostname 的默认名会重新查询。
 - 已不存在的旧 Caddy 服务不会因为残留配置文件阻断重复升级；升级失败会显示阶段，并回滚原配置与服务。
 - Caddy 只有被确认是旧脚本的单订阅站点才会停止；不擅自删除 Caddy 软件包或其他网站。
 - Nginx 使用独立配置与 PID，不覆盖系统 Nginx 或 ArgoX 配置。
@@ -86,13 +86,13 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 - 节点页恢复绿色标题、紫色链接、空行和分隔；新安装完成后直接展示。若已安装 `qrencode` 或保留旧二维码工具，则显示二维码，不强制下载第三方二进制。
 - 修改 RAW、XHTTP、订阅、Argo 内部端口支持回车随机生成，最多尝试 100 次，跳过占用、当前配置以及 3001–3003 保留端口。随机范围为 2000–65000。NAT 用户应优先手动填写服务商允许的端口。
 - 服务启停、隧道模式、订阅管理改为中文数字菜单；非法输入不再被当作关闭订阅。关闭/开启保留原订阅路径。
-- SNI 提供候选列表和自定义输入，分别作用于 RAW 或 XHTTP；候选不代表本站 TLS/后量子能力已验证。
+- SNI 提供候选列表和自定义输入，分别作用于 RAW 或 XHTTP；候选列表不代表相应站点的 TLS/后量子能力已经验证。
 - 直连 IP 可自动获取 IPv4/IPv6 或手动填写；自动检测到 WARP 或无法确认出口时不更新。
 - Argo 优选支持编号、回车保持当前、域名、IPv4、`域名:端口`、`[IPv6]:端口`；同时更新两个 Argo 节点，不改直连节点。
 
 ### 合并后的 Argo 优选预设
 
-来源：[eooce/Sing-box](https://github.com/eooce/Sing-box)、[fscarmen/ArgoX](https://github.com/fscarmen/ArgoX)。2026-11-18 从用户电脑和小水管分别用真实隧道的 SNI/Host 进行 TLS + WebSocket 测试，下列 8 个均返回 HTTP 101：
+来源：[eooce/Sing-box](https://github.com/eooce/Sing-box)、[fscarmen/ArgoX](https://github.com/fscarmen/ArgoX)。2026-11-18 在两个网络环境中，通过实际 Argo 隧道的 SNI/Host 完成 TLS 握手与 WebSocket 转发验证，下列 8 个地址均返回 HTTP 101：
 
 ```
 cf.090227.xyz
