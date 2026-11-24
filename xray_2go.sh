@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.0 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.1 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.0
+SCRIPT_VERSION=2.1.1
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -249,12 +249,15 @@ service_disable() {
 write_runtime_helpers() {
     # 同步器只同步订阅，不检查/重启 Xray 或 Nginx；隧道存活交给 --health 单独探测，
     # 因为临时隧道被云端回收时 cloudflared 不会退出，respawn 与日志抓取都不会触发。
+    # 探测每 6 轮（约 60 秒）执行一次，避免小内存机器上频繁 fork 脚本进程。
     cat > "$work_dir/sync-loop.sh" <<EOF
 #!/bin/sh
 # Managed by shadowxhero/xray-2go
+n=0
 while true; do
     /bin/bash "$work_dir/runtime.sh" --sync >/dev/null 2>&1
-    /bin/bash "$work_dir/runtime.sh" --health >/dev/null 2>&1
+    n=\$((n + 1))
+    [ \$((n % 6)) -eq 0 ] && /bin/bash "$work_dir/runtime.sh" --health >/dev/null 2>&1
     sleep 10
 done
 EOF
@@ -840,15 +843,19 @@ renew_tunnel() {
 
 # 临时隧道（quick）会被 Cloudflare 单方面回收：cloudflared 收到 "Unauthorized: Tunnel not found"
 # 后不退出、一直重连，respawn 不触发，argo.log 里也不会出现新域名，订阅于是长期指向一个
-# DNS 已经消失的域名。这里在锁外做存活探测（with_lock 约定锁内只做短配置写入、不发网络请求），
+# DNS 已经消失的域名。这里按日志判据做存活探测（不取锁、不发网络请求、不增加常驻内存），
 # 连续失败才重启隧道重新申请域名。
 tunnel_probe() {
-    local domain=$1 code
+    local domain=$1 log="$work_dir/argo.log"
     [ -n "$domain" ] || return 1
-    command_exists curl || return 0
-    # 该入口只服务 VLESS/VMess over ws：普通 HTTP 请求拿到 4xx/5xx 属正常，000 才是隧道不通。
-    code=$(curl --noproxy '*' -s -o /dev/null -m 8 -w '%{http_code}' "https://$domain/" 2>/dev/null) || code=000
-    [ -n "$code" ] && [ "$code" != 000 ]
+    [ -f "$log" ] || return 1
+    # 纯日志判据，不发任何网络请求：tunnel-worker 启动时会截断日志，所以这里只看本次进程。
+    # 隧道被回收后 cloudflared 会持续写 "Tunnel not found"；注册成功则写
+    # "Registered tunnel connection"。日志极小（几十行），grep 的进程开销远低于 128MB 机器上
+    # 再 fork 一个 curl 的瞬时峰值。
+    grep -q 'Tunnel not found' "$log" 2>/dev/null && return 1
+    grep -q 'Registered tunnel connection' "$log" 2>/dev/null || return 1
+    return 0
 }
 tunnel_health() {
     [ "$(state tunnel_mode)" = quick ] || return 0

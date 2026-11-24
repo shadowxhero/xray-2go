@@ -1,4 +1,4 @@
-# Xray-2go v2.1.0
+# Xray-2go v2.1.1
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -53,12 +53,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 
 新安装默认开机自启。systemd 使用原生重启策略；Alpine/OpenRC 使用 `supervise-daemon`，异常退出或被 OOM 杀死后重启。Xray/Nginx/同步器重启延迟 5 秒，隧道 60 秒，避免反复申请临时域名触发 429。
 
-**临时隧道被 Cloudflare 回收时进程不会退出**：cloudflared 收到 `Unauthorized: Tunnel not found` 后一直重连，`supervise-daemon` 不触发重启，`argo.log` 里也不会再出现新域名，订阅就会长期指向一个 DNS 已消失的域名。v2.1.0 起同步器每轮额外调用 `2go --health` 做存活探测：
+**临时隧道被 Cloudflare 回收时进程不会退出**：cloudflared 收到 `Unauthorized: Tunnel not found` 后一直重连，`supervise-daemon` 不触发重启，`argo.log` 里也不会再出现新域名，订阅就会长期指向一个 DNS 已消失的域名。v2.1.0 起同步器每 6 轮（约 60 秒）调用一次 `2go --health` 做存活探测：
 
-- 每 60 秒最多探测一次，探测方式是对 `state.json` 里的隧道域名发一次 HTTP 请求；
-- 该入口只服务 VLESS/VMess over ws，普通 HTTP 请求拿到 4xx/5xx 属正常，**拿不到 HTTP 状态码（000）才算隧道不通**；
+- 判据是 `argo.log`：本次进程出现过 `Tunnel not found` 判死，没出现 `Registered tunnel connection` 也判死；
+- 判据不发任何网络请求、不新增常驻内存。128MB 内存的机器上，每轮 fork 一个 `curl` 的瞬时峰值就足以把 cgroup 顶到上限触发 OOM kill；
 - 隧道重启后 180 秒内不判定，等 cloudflared 重新拿到域名；
-- 连续 3 次探测失败才重启 `xray2go-tunnel` 重新申请域名，重启同时写入 `last-renew`，与手动 `--restart` 共用 60 秒冷却，不会连续猛刷 Cloudflare。
+- 连续 3 次探测失败才重启 `xray2go-tunnel` 重新申请域名，重启同时写入 `last-renew`，与手动 `--restart` 共用 60 秒冷却；
+- 只看日志的代价是：cloudflared 静默挂起（既不报错也不退出）时判不出来，需要手动 `2go --restart`。
 
 **主动停止的隧道不会被拉起。** 关闭订阅也会取消订阅服务自启；`xray2go-tunnel` 被人为 stop 时健康探测会直接跳过，只有"服务在运行但域名已经不通"才会重启。Nginx 使用低负载单进程前台模式，避免主进程被杀后留下 worker 占端口。
 
@@ -74,7 +75,7 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 2go --version
 2go --check
 2go --restart       # 临时隧道重新申请，有 60 秒冷却
-2go --health        # 只探测一次临时隧道存活，不通时按连续失败计数决定是否重启隧道
+2go --health        # 读 argo.log 判定临时隧道存活，连续失败时重启隧道换域名
 2go --update        # 下载/校验并保存 GitHub 最新脚本，不重启服务
 2go --repair        # 只用本机版本修复服务，保留配置，可能重启原服务
 2go --upgrade       # 兼容旧命令，等同 --repair
@@ -91,9 +92,11 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 
 菜单支持：独立节点命名、RAW/XHTTP 端口、订阅端口、订阅开关、服务启停、固定/临时隧道、UUID、SNI、Argo 优选 IP/域名和端口、IPv4/IPv6 直连地址、Argo 内部端口。
 
-### 临时隧道自愈（v2.1.0）
+### 临时隧道自愈（v2.1.0 / v2.1.1）
 
-上游只处理了“进程退出后重启”，没有处理“进程还活着、隧道已被云端回收”。v2.1.0 在同步循环里加入 `--health`，按“60 秒节流 + 重启后 180 秒缓冲 + 连续 3 次探测失败”重启隧道重新申请域名，订阅随之刷新。
+上游只处理了“进程退出后重启”，没有处理“进程还活着、隧道已被云端回收”。v2.1.0 在同步循环里加入 `--health`，按“重启后 180 秒缓冲 + 连续 3 次探测失败”重启隧道重新申请域名，订阅随之刷新。
+
+**v2.1.1 把探测判据从 HTTP 请求改成读 `argo.log`。** 128MB 内存的机器上（`memory.max` 128MiB），`--health` 每轮 fork 一个 `curl` 的瞬时峰值就会把 cgroup 顶到上限触发 OOM kill：实测 `memory.events` 的 `oom_kill` 累计 5 次、`memory.peak` 132.7MB 已超过上限，表现为 xray 与 cloudflared 被反复杀掉、客户端整机连不上。日志判据不联网，探测频率也降为约 60 秒一次。
 
 **升级后需要重建服务**（`2go --repair` 或菜单 17）才会写入新的 `sync-loop.sh`；只执行 `--update` 仅保存脚本，已经运行的同步循环内容不会改变。
 

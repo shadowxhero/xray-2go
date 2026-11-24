@@ -350,6 +350,8 @@ cleanup_failed_install
         text = (self.home / 'sync-loop.sh').read_text()
         self.assertIn('--sync', text)
         self.assertIn('--health', text)
+        # 探测每 6 轮（约 60 秒）一次，避免小内存机器上频繁 fork。
+        self.assertIn('n % 6', text)
 
     def test_tunnel_health_restarts_quick_tunnel_after_three_failed_probes(self):
         self.run_shell(r'''
@@ -416,15 +418,25 @@ tunnel_health
 test ! -s "$CASE/probes"
 ''')
 
-    def test_tunnel_probe_treats_http_status_as_alive_and_000_as_dead(self):
+    def test_tunnel_probe_uses_cloudflared_log_and_never_touches_network(self):
+        log = self.home / 'argo.log'
+        log.write_text('INF Registered tunnel connection connIndex=0\n')
         self.run_shell(r'''
-curl() { printf 502; }
+curl() { printf x >> "$CASE/net-called"; }
+wget() { printf x >> "$CASE/net-called"; }
 tunnel_probe old.trycloudflare.com
-curl() { printf 000; }
-! tunnel_probe old.trycloudflare.com
-curl() { return 6; }
-! tunnel_probe old.trycloudflare.com
+test ! -f "$CASE/net-called"
 ''')
+        # 隧道被回收：cloudflared 会持续写 "Tunnel not found"。
+        log.write_text('INF Registered tunnel connection\n'
+                       'ERR Register tunnel error from server side error="Unauthorized: Tunnel not found"\n')
+        self.run_shell('! tunnel_probe old.trycloudflare.com\n')
+        # 还没注册成功（刚重启）：没有 Registered 就不算活。
+        log.write_text('INF Requesting new quick Tunnel on trycloudflare.com...\n')
+        self.run_shell('! tunnel_probe old.trycloudflare.com\n')
+        # 日志缺失时保守判死，由 180 秒重启缓冲避免误杀。
+        log.unlink()
+        self.run_shell('! tunnel_probe old.trycloudflare.com\n')
 
 
 if __name__ == '__main__':
