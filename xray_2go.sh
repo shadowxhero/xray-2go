@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.0.9 — based on eooce/xray-2go (MIT).
-# 专属 Nginx、原生服务监督、原子订阅与安全迁移。2026-11-18
+# Xray-2go v2.1.0 — based on eooce/xray-2go (MIT).
+# 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.0.9
+SCRIPT_VERSION=2.1.0
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -247,12 +247,14 @@ service_disable() {
     else systemctl disable "$1" >/dev/null 2>&1 || true; fi
 }
 write_runtime_helpers() {
-    # 同步器只同步，不检查/重启 Xray、隧道或 Nginx。
+    # 同步器只同步订阅，不检查/重启 Xray 或 Nginx；隧道存活交给 --health 单独探测，
+    # 因为临时隧道被云端回收时 cloudflared 不会退出，respawn 与日志抓取都不会触发。
     cat > "$work_dir/sync-loop.sh" <<EOF
 #!/bin/sh
 # Managed by shadowxhero/xray-2go
 while true; do
     /bin/bash "$work_dir/runtime.sh" --sync >/dev/null 2>&1
+    /bin/bash "$work_dir/runtime.sh" --health >/dev/null 2>&1
     sleep 10
 done
 EOF
@@ -831,6 +833,47 @@ renew_tunnel() {
     [ ! -f "$work_dir/last-renew" ] || read -r last < "$work_dir/last-renew"
     ((now-last>=60)) || { red '请等待 60 秒后再申请'; return 1; }
     printf '%s\n' "$now" > "$work_dir/last-renew"
+    # 新隧道尚未拿到域名，旧域名的失败计数必须归零，否则会立刻被判死再重启一次。
+    rm -f "$work_dir/.health-fails"
+    service_action xray2go-tunnel restart
+}
+
+# 临时隧道（quick）会被 Cloudflare 单方面回收：cloudflared 收到 "Unauthorized: Tunnel not found"
+# 后不退出、一直重连，respawn 不触发，argo.log 里也不会出现新域名，订阅于是长期指向一个
+# DNS 已经消失的域名。这里在锁外做存活探测（with_lock 约定锁内只做短配置写入、不发网络请求），
+# 连续失败才重启隧道重新申请域名。
+tunnel_probe() {
+    local domain=$1 code
+    [ -n "$domain" ] || return 1
+    command_exists curl || return 0
+    # 该入口只服务 VLESS/VMess over ws：普通 HTTP 请求拿到 4xx/5xx 属正常，000 才是隧道不通。
+    code=$(curl --noproxy '*' -s -o /dev/null -m 8 -w '%{http_code}' "https://$domain/" 2>/dev/null) || code=000
+    [ -n "$code" ] && [ "$code" != 000 ]
+}
+tunnel_health() {
+    [ "$(state tunnel_mode)" = quick ] || return 0
+    local domain now ts=0 last=0 fails=0
+    domain=$(state tunnel_domain) || return 0
+    [ -n "$domain" ] || return 0
+    now=$(date +%s)
+    # 探测节流 60 秒，避免同步器每一轮都发外部请求。
+    [ ! -f "$work_dir/.health-ts" ] || read -r ts < "$work_dir/.health-ts"
+    [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+    ((now-ts>=60)) || return 0
+    # 隧道刚重启时旧域名必然不通，留 180 秒等 cloudflared 拿到新域名再判定。
+    [ ! -f "$work_dir/last-renew" ] || read -r last < "$work_dir/last-renew"
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    ((now-last>=180)) || return 0
+    printf '%s\n' "$now" > "$work_dir/.health-ts"
+    if tunnel_probe "$domain"; then rm -f "$work_dir/.health-fails"; return 0; fi
+    # 用户主动停止隧道（切换固定隧道、临时关闭）时不自动拉起，与手动 stop 的约定一致。
+    service_status xray2go-tunnel || { rm -f "$work_dir/.health-fails"; return 0; }
+    [ ! -f "$work_dir/.health-fails" ] || read -r fails < "$work_dir/.health-fails"
+    [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+    fails=$((fails+1)); printf '%s\n' "$fails" > "$work_dir/.health-fails"
+    ((fails>=3)) || return 0
+    rm -f "$work_dir/.health-fails"
+    printf '%s\n' "$now" > "$work_dir/last-renew"
     service_action xray2go-tunnel restart
 }
 set_argo_port() { with_lock tunnel_transaction set_argo_port_unlocked "$1"; }
@@ -1220,7 +1263,7 @@ rename_nodes() { [ -n "$1" ] && state_string name "$1" && generate_subscription_
 main() {
     case "${1:-}" in
         --version) printf '%s\n' "$SCRIPT_VERSION"; return;;
-        -h|--help) printf '2go [-i|--install] [--update] [--repair|--upgrade] [-c|--check] [-r|--restart] [-u|--uninstall] [--sync] [--version]\n--update 下载并保存 GitHub 最新脚本，不重启服务或更新内核。\n--repair/--upgrade 使用当前运行版本修复或迁移服务，保留配置，可能重启服务。\n';return;;
+        -h|--help) printf '2go [-i|--install] [--update] [--repair|--upgrade] [-c|--check] [-r|--restart] [-u|--uninstall] [--sync] [--health] [--version]\n--update 下载并保存 GitHub 最新脚本，不重启服务或更新内核。\n--repair/--upgrade 使用当前运行版本修复或迁移服务，保留配置，可能重启服务。\n--health 探测临时隧道是否还活着，连续 60 秒级失败三次才重启隧道换域名。\n';return;;
     esac
     require_root || return 1
     case "${1:-}" in
@@ -1234,6 +1277,7 @@ main() {
         -r|--restart) renew_tunnel;;
         -u|--uninstall) uninstall_owned;;
         --sync) sync_subscription;;
+        --health) tunnel_health;;
         --tunnel-worker) tunnel_worker;;
         '') refresh_script_on_launch && menu;;
         *) red '未知参数，请用 --help';return 1;;

@@ -1,4 +1,4 @@
-# Xray-2go v2.0.9
+# Xray-2go v2.1.0
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -49,11 +49,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 | `xray2go-core` | Xray |
 | `xray2go-tunnel` | cloudflared |
 | `xray2go-sub` | 独立 Nginx 订阅服务 |
-| `xray2go-sync` | 自动同步隧道域名和四节点订阅 |
+| `xray2go-sync` | 同步隧道域名、四节点订阅，并探测临时隧道是否存活 |
 
 新安装默认开机自启。systemd 使用原生重启策略；Alpine/OpenRC 使用 `supervise-daemon`，异常退出或被 OOM 杀死后重启。Xray/Nginx/同步器重启延迟 5 秒，隧道 60 秒，避免反复申请临时域名触发 429。
 
-**主动 stop 不会被同步器自动拉起。** 关闭订阅也会取消订阅服务自启。同步器只维护订阅，不循环检测并重启其他进程。Nginx 使用低负载单进程前台模式，避免主进程被杀后留下 worker 占端口。
+**临时隧道被 Cloudflare 回收时进程不会退出**：cloudflared 收到 `Unauthorized: Tunnel not found` 后一直重连，`supervise-daemon` 不触发重启，`argo.log` 里也不会再出现新域名，订阅就会长期指向一个 DNS 已消失的域名。v2.1.0 起同步器每轮额外调用 `2go --health` 做存活探测：
+
+- 每 60 秒最多探测一次，探测方式是对 `state.json` 里的隧道域名发一次 HTTP 请求；
+- 该入口只服务 VLESS/VMess over ws，普通 HTTP 请求拿到 4xx/5xx 属正常，**拿不到 HTTP 状态码（000）才算隧道不通**；
+- 隧道重启后 180 秒内不判定，等 cloudflared 重新拿到域名；
+- 连续 3 次探测失败才重启 `xray2go-tunnel` 重新申请域名，重启同时写入 `last-renew`，与手动 `--restart` 共用 60 秒冷却，不会连续猛刷 Cloudflare。
+
+**主动停止的隧道不会被拉起。** 关闭订阅也会取消订阅服务自启；`xray2go-tunnel` 被人为 stop 时健康探测会直接跳过，只有"服务在运行但域名已经不通"才会重启。Nginx 使用低负载单进程前台模式，避免主进程被杀后留下 worker 占端口。
+
+这台机器的同步器仍然只做上面这些事，不会重启 Xray 或 Nginx。
 
 Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30MiB`、`GOGC=25`。这些是 Go 运行时软目标，不是硬上限，不保证永不 OOM。若内存不足持续 OOM，应减少负载或增加内存。
 
@@ -65,6 +74,7 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 2go --version
 2go --check
 2go --restart       # 临时隧道重新申请，有 60 秒冷却
+2go --health        # 只探测一次临时隧道存活，不通时按连续失败计数决定是否重启隧道
 2go --update        # 下载/校验并保存 GitHub 最新脚本，不重启服务
 2go --repair        # 只用本机版本修复服务，保留配置，可能重启原服务
 2go --upgrade       # 兼容旧命令，等同 --repair
@@ -80,6 +90,12 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 旧版 `2go` 没有 `--update` 时，直接运行仓库一键命令即可获得该行为。旧 Caddy 安装尚未迁移的仍需显式选择迁移，不能把“保存新版脚本”当成“重建服务”。参数 `--upgrade`/`--repair` 只用于后者。
 
 菜单支持：独立节点命名、RAW/XHTTP 端口、订阅端口、订阅开关、服务启停、固定/临时隧道、UUID、SNI、Argo 优选 IP/域名和端口、IPv4/IPv6 直连地址、Argo 内部端口。
+
+### 临时隧道自愈（v2.1.0）
+
+上游只处理了“进程退出后重启”，没有处理“进程还活着、隧道已被云端回收”。v2.1.0 在同步循环里加入 `--health`，按“60 秒节流 + 重启后 180 秒缓冲 + 连续 3 次探测失败”重启隧道重新申请域名，订阅随之刷新。
+
+**升级后需要重建服务**（`2go --repair` 或菜单 17）才会写入新的 `sync-loop.sh`；只执行 `--update` 仅保存脚本，已经运行的同步循环内容不会改变。
 
 ### 恢复的交互方式（v2.0.6）
 

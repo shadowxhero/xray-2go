@@ -2,6 +2,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -310,10 +311,12 @@ cleanup_failed_install
         self.assertFalse((self.home / 'state.json').exists())
 
     def test_cli_process_substitution_does_not_lose_runtime_script(self):
+        # 断言"输出了脚本里声明的版本"，不绑定具体版本号，升版不必改这条测试。
+        expected = re.search(r'^SCRIPT_VERSION=(\S+)$', SCRIPT.read_text(), re.M).group(1)
         r = subprocess.run(['bash', '-c', 'bash <(cat "$SCRIPT") --version'],
             env={**os.environ, 'SCRIPT': str(SCRIPT)}, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '2.0.9')
+        self.assertEqual(r.stdout.strip(), expected)
 
     def test_caddy_migration_rejects_unrelated_websites(self):
         cf = self.d / 'Caddyfile'
@@ -341,6 +344,87 @@ cleanup_failed_install
         self.assertEqual(s['subscription_port'], 43013)
         self.assertEqual(s['subscription_path'], 'KeepOldPath')
         self.assertEqual(before, (self.home / 'config.json').read_bytes())
+
+    def test_sync_loop_probes_tunnel_health_each_cycle(self):
+        self.run_shell('write_runtime_helpers\n')
+        text = (self.home / 'sync-loop.sh').read_text()
+        self.assertIn('--sync', text)
+        self.assertIn('--health', text)
+
+    def test_tunnel_health_restarts_quick_tunnel_after_three_failed_probes(self):
+        self.run_shell(r'''
+tunnel_probe() { return 1; }
+service_status() { return 0; }
+service_action() { printf '%s %s\n' "$1" "$2" >> "$CASE/actions"; }
+rm -f "$work_dir/.health-ts"; tunnel_health
+rm -f "$work_dir/.health-ts"; tunnel_health
+test ! -f "$CASE/actions"
+rm -f "$work_dir/.health-ts"; tunnel_health
+''')
+        self.assertEqual((self.d / 'actions').read_text(), 'xray2go-tunnel restart\n')
+        self.assertFalse((self.home / '.health-fails').exists())
+
+    def test_tunnel_health_leaves_manually_stopped_tunnel_alone(self):
+        self.run_shell(r'''
+tunnel_probe() { return 1; }
+service_status() { return 1; }
+service_action() { printf '%s %s\n' "$1" "$2" >> "$CASE/actions"; }
+printf '2\n' > "$work_dir/.health-fails"
+rm -f "$work_dir/.health-ts"
+tunnel_health
+test ! -f "$CASE/actions"
+test ! -f "$work_dir/.health-fails"
+''')
+
+    def test_tunnel_health_clears_counter_when_probe_recovers(self):
+        self.run_shell(r'''
+tunnel_probe() { return 0; }
+service_action() { printf '%s %s\n' "$1" "$2" >> "$CASE/actions"; }
+printf '2\n' > "$work_dir/.health-fails"
+rm -f "$work_dir/.health-ts"
+tunnel_health
+test ! -f "$work_dir/.health-fails"
+test ! -f "$CASE/actions"
+''')
+
+    def test_tunnel_health_skips_fixed_tunnel(self):
+        self.state.update(tunnel_mode='token', tunnel_domain='fixed.example.com')
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell(r'''
+tunnel_probe() { printf x >> "$CASE/probes"; return 1; }
+service_action() { printf '%s %s\n' "$1" "$2" >> "$CASE/actions"; }
+tunnel_health
+test ! -f "$CASE/probes"
+test ! -f "$CASE/actions"
+''')
+
+    def test_tunnel_health_throttles_probe_and_waits_after_restart(self):
+        self.run_shell(r'''
+tunnel_probe() { printf x >> "$CASE/probes"; return 0; }
+date() { printf 1000; }
+: > "$CASE/probes"
+printf '950\n' > "$work_dir/.health-ts"
+tunnel_health
+test ! -s "$CASE/probes"
+printf '900\n' > "$work_dir/.health-ts"
+tunnel_health
+test -s "$CASE/probes"
+printf '950\n' > "$work_dir/last-renew"
+printf '900\n' > "$work_dir/.health-ts"
+: > "$CASE/probes"
+tunnel_health
+test ! -s "$CASE/probes"
+''')
+
+    def test_tunnel_probe_treats_http_status_as_alive_and_000_as_dead(self):
+        self.run_shell(r'''
+curl() { printf 502; }
+tunnel_probe old.trycloudflare.com
+curl() { printf 000; }
+! tunnel_probe old.trycloudflare.com
+curl() { return 6; }
+! tunnel_probe old.trycloudflare.com
+''')
 
 
 if __name__ == '__main__':
