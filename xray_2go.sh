@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.1 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.2 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.1
+SCRIPT_VERSION=2.1.2
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -264,7 +264,7 @@ EOF
     cat > "$work_dir/tunnel-worker.sh" <<EOF
 #!/bin/sh
 # Managed by shadowxhero/xray-2go
-export GOMEMLIMIT=30MiB GOGC=25
+export GOMEMLIMIT=20MiB GOGC=15
 exec /bin/bash "$work_dir/runtime.sh" --tunnel-worker
 EOF
     chmod 700 "$work_dir/sync-loop.sh" "$work_dir/tunnel-worker.sh"
@@ -292,8 +292,8 @@ respawn_delay=$delay
 respawn_max=0
 respawn_period=0
 pidfile="$run_dir/$name.pid"
-export GOMEMLIMIT=48MiB
-export GOGC=30
+export GOMEMLIMIT=${XRAY_GOMEMLIMIT:-32MiB}
+export GOGC=${XRAY_GOGC:-20}
 depend() { need net; }
 EOF
         chmod 755 "$init_dir/$name"
@@ -323,7 +323,7 @@ ExecStart=$exec
 Restart=always
 RestartSec=$delay
 KillMode=control-group
-Environment="GOMEMLIMIT=48MiB" "GOGC=30"
+Environment="GOMEMLIMIT=${XRAY_GOMEMLIMIT:-32MiB}" "GOGC=${XRAY_GOGC:-20}"
 StandardOutput=null
 StandardError=null
 [Install]
@@ -335,7 +335,7 @@ EOF
 tunnel_worker() {
     local mode port token
     mode=$(state tunnel_mode); port=$(state argo_port)
-    export GOMEMLIMIT=${ARGO_GOMEMLIMIT:-30MiB} GOGC=${ARGO_GOGC:-25}
+    export GOMEMLIMIT=${ARGO_GOMEMLIMIT:-20MiB} GOGC=${ARGO_GOGC:-15}
     # 只保留当前进程日志，避免同步器拿到上次进程的旧域名。
     : > "$work_dir/argo.log"; chmod 600 "$work_dir/argo.log"
     case "$mode" in

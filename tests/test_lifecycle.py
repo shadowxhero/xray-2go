@@ -418,6 +418,21 @@ tunnel_health
 test ! -s "$CASE/probes"
 ''')
 
+    def test_service_memory_targets_are_low_enough_for_small_hosts(self):
+        self.run_shell('write_runtime_helpers\nwrite_openrc_services\nwrite_systemd_services\n')
+        svc = (self.d / 'init.d' / 'xray2go-core').read_text()
+        self.assertIn('GOMEMLIMIT=32MiB', svc)
+        self.assertIn('GOGC=20', svc)
+        unit = (self.d / 'systemd' / 'xray2go-core.service').read_text()
+        self.assertIn('GOMEMLIMIT=32MiB', unit)
+        self.assertIn('GOGC=20', unit)
+        worker = (self.home / 'tunnel-worker.sh').read_text()
+        self.assertIn('GOMEMLIMIT=20MiB', worker)
+        self.assertIn('GOGC=15', worker)
+        # cloudflared 真正运行前的 export 也要用同一组默认值。
+        self.assertIn('ARGO_GOMEMLIMIT:-20MiB', SCRIPT.read_text())
+        self.assertIn('ARGO_GOGC:-15', SCRIPT.read_text())
+
     def test_tunnel_probe_uses_cloudflared_log_and_never_touches_network(self):
         log = self.home / 'argo.log'
         log.write_text('INF Registered tunnel connection connIndex=0\n')

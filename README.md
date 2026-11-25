@@ -1,4 +1,4 @@
-# Xray-2go v2.1.1
+# Xray-2go v2.1.2
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -65,7 +65,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 
 这台机器的同步器仍然只做上面这些事，不会重启 Xray 或 Nginx。
 
-Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30MiB`、`GOGC=25`。这些是 Go 运行时软目标，不是硬上限，不保证永不 OOM。若内存不足持续 OOM，应减少负载或增加内存。
+Xray 设置 `GOMEMLIMIT=32MiB`、`GOGC=20`；cloudflared 设置 `GOMEMLIMIT=20MiB`、`GOGC=15`（v2.1.2 起，此前为 48/30 与 30/25）。这两个默认值可在安装或升级时用 `XRAY_GOMEMLIMIT`/`XRAY_GOGC`/`ARGO_GOMEMLIMIT`/`ARGO_GOGC` 覆盖（`XRAY_*` 在写服务定义时求值，改完需 `2go --repair`）。
+
+这些都是 Go 运行时的软目标，不是硬上限，不保证永不 OOM。**128MiB 内存的机器即使调到上面这组值仍然很紧**：实测 `argo 30~39MB + xray 25~35MB + 第三方 agent 10~15MB`，cgroup 记账再加 page cache 就能顶到 128MiB 上限并触发 OOM kill（被杀一次就重申请临时隧道、换域名，客户端随即失效）。这种机器应当停掉非必要的常驻程序、把内存加到 256MiB 以上，或只保留 Reality 直连（去掉 cloudflared 可省约 36MB）。
 
 ## 管理
 
@@ -92,11 +94,13 @@ Xray 设置 `GOMEMLIMIT=48MiB`、`GOGC=30`；cloudflared 设置 `GOMEMLIMIT=30Mi
 
 菜单支持：独立节点命名、RAW/XHTTP 端口、订阅端口、订阅开关、服务启停、固定/临时隧道、UUID、SNI、Argo 优选 IP/域名和端口、IPv4/IPv6 直连地址、Argo 内部端口。
 
-### 临时隧道自愈（v2.1.0 / v2.1.1）
+### 临时隧道自愈与内存参数（v2.1.0 / v2.1.1 / v2.1.2）
 
 上游只处理了“进程退出后重启”，没有处理“进程还活着、隧道已被云端回收”。v2.1.0 在同步循环里加入 `--health`，按“重启后 180 秒缓冲 + 连续 3 次探测失败”重启隧道重新申请域名，订阅随之刷新。
 
 **v2.1.1 把探测判据从 HTTP 请求改成读 `argo.log`。** 128MB 内存的机器上（`memory.max` 128MiB），`--health` 每轮 fork 一个 `curl` 的瞬时峰值就会把 cgroup 顶到上限触发 OOM kill：实测 `memory.events` 的 `oom_kill` 累计 5 次、`memory.peak` 132.7MB 已超过上限，表现为 xray 与 cloudflared 被反复杀掉、客户端整机连不上。日志判据不联网，探测频率也降为约 60 秒一次。
+
+**v2.1.2 把两个 Go 程序的内存软目标调低**（Xray 48MiB/GOGC30 → 32MiB/GOGC20，cloudflared 30MiB/GOGC25 → 20MiB/GOGC15），并支持用环境变量覆盖。同一台 128MiB 机器在 v2.1.1 之后 13 小时里仍被 OOM 杀了 2 次（`oom_kill` 5→7，`argo` 被杀后重申请临时隧道、域名改变、客户端全部失效），所以调低软目标属于缓解而不是根治。
 
 **升级后需要重建服务**（`2go --repair` 或菜单 17）才会写入新的 `sync-loop.sh`；只执行 `--update` 仅保存脚本，已经运行的同步循环内容不会改变。
 
