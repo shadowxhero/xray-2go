@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.6 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.7 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.6
+SCRIPT_VERSION=2.1.7
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -1419,7 +1419,8 @@ interactive_tunnel() {
     esac || { red '隧道操作失败，未确认成功。';return 1; }
     green '隧道操作已提交。若重新申请临时域名，同步器会自动更新两个 Argo 节点；Cloudflare 限流时不会立即恢复。'
 }
-# 新安装前询问要装哪些协议，返回逗号分隔列表；直接回车=全部四个。
+# 新安装前询问要装哪些协议。注意：结果写进全局 PROTOCOLS，不要用 $(...) 捕获，
+# 否则菜单和编号列表会被命令替换吃掉，屏幕上只剩 read 的提示符。
 ask_install_protocols() {
     local i input list
     menu_color 32 '选择要安装的协议（编号可连写，例如 13；直接回车=全部四个）：'
@@ -1431,7 +1432,7 @@ ask_install_protocols() {
     while true; do
         reading '请选择：' input || return 1
         if list=$(protocols_from_digits "$input"); then
-            printf '%s\n' "$list"
+            PROTOCOLS="$list"
             return 0
         fi
         red '无效输入：只能输入 1-4 的组合，例如 13 或 1234。'
@@ -1536,7 +1537,7 @@ menu() {
             red '该选项在当前安装状态不可用，请选择屏幕中显示的选项。';menu_pause;continue
         fi
         case "$choice" in
-            1) if PROTOCOLS=$(ask_install_protocols);then install_fresh;fi ;;
+            1) if ask_install_protocols;then install_fresh;fi ;;
             2) if [ "$status" = installed ];then
                    if online_update;then green '重新运行 2go 进入更新后的菜单。';return 0;fi
                else upgrade_installation;fi ;;

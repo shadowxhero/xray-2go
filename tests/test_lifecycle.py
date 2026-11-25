@@ -182,6 +182,25 @@ out=$(protocols_detect | tr '\n' ' ')
 test "$out" = "raw-reality xhttp-reality vless-argo "
 ''')
 
+    def test_ask_install_protocols_sets_variable_and_keeps_menu_visible(self):
+        # 菜单里是直接调用（不是 $(...) 捕获），提示必须真的打印出来，
+        # 结果只写进 PROTOCOLS 变量。
+        self.run_shell(r'''
+out=$(ask_install_protocols <<< "13")
+case "$out" in
+    *"选择要安装的协议"*) ;;
+    *) echo "菜单没打印出来"; exit 1 ;;
+esac
+case "$out" in
+    *"1. VLESS RAW"*) ;;
+    *) echo "编号列表没打印出来"; exit 1 ;;
+esac
+ask_install_protocols <<< "13"
+test "$PROTOCOLS" = "raw-reality,vless-argo"
+ask_install_protocols <<< ""
+test "$PROTOCOLS" = "raw-reality,xhttp-reality,vless-argo,vmess-argo"
+''')
+
     def test_protocols_from_digits_accepts_compact_input(self):
         self.run_shell(r'''
 test "$(protocols_from_digits 13)" = "raw-reality,vless-argo"
