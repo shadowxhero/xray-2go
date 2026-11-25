@@ -71,6 +71,8 @@ Xray 设置 `GOMEMLIMIT=32MiB`、`GOGC=20`；cloudflared 设置 `GOMEMLIMIT=20Mi
 
 这些都是 Go 运行时的软目标，不是硬上限，不保证永不 OOM。**128MiB 内存的机器即使调到上面这组值仍然很紧**：实测 `argo 30~39MB + xray 25~35MB + 第三方 agent 10~15MB`，cgroup 记账再加 page cache 就能顶到 128MiB 上限并触发 OOM kill（被杀一次就重申请临时隧道、换域名，客户端随即失效）。这种机器应当停掉非必要的常驻程序、把内存加到 256MiB 以上，或只保留 Reality 直连（去掉 cloudflared 可省约 36MB）。
 
+暂时不能加内存时，可以在**机器本地**把 cgroup v2 的 `memory.high` 设为硬上限的 87.5%（128MiB → 112MiB），让内核提前回收页缓存而不是硬撞 `memory.max`：实测同一台机的 `memory.current` 从 116MB 降到 100MB、`workingset_refault` 增量为 0（没有性能抖动）。**这是机器级配置，不属于本脚本**——脚本管进程与协议配置，内存策略属于平台层；写死数值在扩容后会变成性能枷锁，所以按比例计算更稳。Alpine 下的做法是 `/etc/local.d/memory-tune.start` + `rc-update add local default`。
+
 ## 管理
 
 `2go` 使用本机保存的当前版本，不会再运行 eooce 的原始脚本。
