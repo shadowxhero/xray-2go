@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.7 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.8 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.7
+SCRIPT_VERSION=2.1.8
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -231,6 +231,9 @@ sync_subscription_unlocked() {
         old=$(state tunnel_domain || true)
         if [ "$domain" != "$old" ]; then state_string tunnel_domain "$domain" || return 1; fi
     fi
+    # 订阅关闭时不写没人下载的订阅文件（槽位留给隧道域名同步与健康检查）；
+    # 重新开启订阅时会立刻补生成一次，不会拿到关闭期间的旧内容。
+    if ! jq -e .subscription_enabled "$state_file" >/dev/null 2>&1; then return 0; fi
     generate_subscription_unlocked
 }
 
@@ -614,8 +617,14 @@ set_subscription_port_unlocked() {
 }
 set_subscription_enabled() {
     if [ "$1" = true ]; then
+        state_set subscription_enabled true || return 1
+        # 关闭期间同步器不再生成订阅文件，开启时补一次，避免拿到旧域名/旧协议。
+        if ! generate_subscription; then
+            state_set subscription_enabled false || true
+            red '订阅生成失败，已保持关闭状态。'
+            return 1
+        fi
         service_enable xray2go-sub && service_action xray2go-sub start && subscription_probe || return 1
-        state_set subscription_enabled true
     else
         service_action xray2go-sub stop || return 1
         service_disable xray2go-sub; state_set subscription_enabled false
@@ -1395,7 +1404,7 @@ interactive_subscription() {
     reading '选择：' choice || return 1
     case "$choice" in
         1) set_subscription_enabled true && { green '订阅已开启。';menu_color 35 "$(subscription_url)"; };;
-        2) set_subscription_enabled false && green '订阅已关闭并取消订阅服务自启。';;
+        2) set_subscription_enabled false && green '订阅已关闭并取消订阅服务自启。同步器仍在运行，负责隧道域名与健康检查（关闭期间不再生成订阅文件）。';;
         3) interactive_port sub;;
         4) if ! jq -e .subscription_enabled "$state_file" >/dev/null;then red '订阅已关闭，请先选择开启订阅。';return 0;fi
            service_action xray2go-sub restart && subscription_probe && green '订阅服务已重启并通过本机内容检查。';;

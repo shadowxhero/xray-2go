@@ -450,6 +450,33 @@ cleanup_failed_install
         self.assertEqual(s['subscription_path'], 'KeepOldPath')
         self.assertEqual(before, (self.home / 'config.json').read_bytes())
 
+    def test_sync_skips_file_generation_when_subscription_disabled(self):
+        self.state['subscription_enabled'] = False
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('generate_subscription\n')
+        before = (self.home / 'url.txt').read_text()
+        (self.home / 'argo.log').write_text('https://fresh.trycloudflare.com\n')
+        self.run_shell('sync_subscription\n')
+        # 订阅关闭：文件保持原样，但隧道域名照常同步（重新开启时要靠它）。
+        self.assertEqual(before, (self.home / 'url.txt').read_text())
+        s = json.loads((self.home / 'state.json').read_text())
+        self.assertEqual(s['tunnel_domain'], 'fresh.trycloudflare.com')
+
+    def test_reenabling_subscription_regenerates_files_with_latest_domain(self):
+        self.state['subscription_enabled'] = False
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('generate_subscription\n')
+        (self.home / 'argo.log').write_text('https://fresh.trycloudflare.com\n')
+        self.run_shell(r'''
+service_enable() { :; }
+service_action() { :; }
+subscription_probe() { :; }
+sync_subscription
+set_subscription_enabled true
+''')
+        ns = self.nodes()
+        self.assertEqual(parse_qs(urlsplit(ns[2]).query)['host'], ['fresh.trycloudflare.com'])
+
     def test_sync_loop_probes_tunnel_health_each_cycle(self):
         self.run_shell('write_runtime_helpers\n')
         text = (self.home / 'sync-loop.sh').read_text()
