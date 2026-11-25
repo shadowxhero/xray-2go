@@ -560,6 +560,25 @@ test "$(warp_geosite_tag google)" = "geosite:google"
         cfg = json.loads((self.home / 'config.json').read_text())
         self.assertNotIn('proxy-1', [o.get('tag') for o in cfg['outbounds']])
 
+    def test_warp_apply_auto_enables_warp_when_routes_exist_without_outbound(self):
+        # 用户只点「设置分流服务」没先开 WARP 时，规则不能指向不存在的出站。
+        self.state['warp'] = {'routes': ['gemini'], 'outbound': 'warp'}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('warp_apply\n')
+        st = json.loads((self.home / 'state.json').read_text())
+        self.assertTrue(st['warp']['enabled'])
+        cfg = json.loads((self.home / 'config.json').read_text())
+        self.assertIn('warp', [o.get('tag') for o in cfg['outbounds']])
+        self.assertEqual(cfg['routing']['rules'][0]['outboundTag'], 'warp')
+
+    def test_warp_apply_rejects_unknown_proxy_target(self):
+        self.state['warp'] = {'routes': ['gemini'], 'outbound': 'proxy-missing'}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        r = self.run_shell('warp_apply\n', ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        cfg = json.loads((self.home / 'config.json').read_text())
+        self.assertNotIn('routing', cfg)
+
     def test_sync_skips_file_generation_when_subscription_disabled(self):
         self.state['subscription_enabled'] = False
         (self.home / 'state.json').write_text(json.dumps(self.state))

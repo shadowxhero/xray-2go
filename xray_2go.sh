@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.2.0 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.2.1 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测、WARP 分流与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.2.0
+SCRIPT_VERSION=2.2.1
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -472,6 +472,23 @@ warp_apply_unlocked() {
     enabled=$(warp_enabled); target=$(warp_target); geosite=$(warp_on_geosite)
     global=$(warp_global); routes=$(warp_routes); proxies=$(jq -c '.warp.proxies // []' "$state_file" 2>/dev/null)
     [ -n "$proxies" ] || proxies='[]'
+    # 防御：有分流规则但目标出站不存在时，规则会指向空出站、相关连接直接断。
+    # xray -test 不校验 outboundTag 是否存在，这里必须自己拦。
+    if [ -n "$routes" ] && [ "$enabled" != true ]; then
+        case "$target" in
+            warp)
+                warp_set enabled true || return 1
+                enabled=true
+                menu_color 33 '检测到分流规则但 WARP 未启用，已自动开启 WARP 出站。'
+                ;;
+            *)
+                if ! jq -e --arg t "$target" '(.warp.proxies // []) | map(.tag) | index($t)' "$state_file" >/dev/null 2>&1; then
+                    red "分流目标 $target 不存在，请先开启 WARP 或重新选择分流目标。"
+                    return 1
+                fi
+                ;;
+        esac
+    fi
     candidate=$(mktemp "$work_dir/.config.XXXXXX") || return 1
     jq 'del(.outbounds[]? | select((.tag // "") == "warp" or ((.tag // "") | startswith("proxy-"))))
         | del(.routing.rules[]? | select((.outboundTag // "") == "warp" or ((.outboundTag // "") | startswith("proxy-"))))
@@ -1755,7 +1772,7 @@ interactive_warp_add_proxy() {
 interactive_warp_del_proxy() {
     local tags i tag choice tmp
     tags=$(warp_proxy_tags)
-    [ -n "$tags" ] || { yellow '没有自定义出站。' ; return 0; }
+    [ -n "$tags" ] || { menu_color 33 '没有自定义出站。' ; return 0; }
     i=1
     for tag in $tags; do menu_color 32 "  $i. $tag"; i=$((i+1)); done
     reading '要删除的编号（0 返回）：' choice || return 1

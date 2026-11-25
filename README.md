@@ -1,4 +1,4 @@
-# Xray-2go v2.2.0
+# Xray-2go v2.2.1
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
