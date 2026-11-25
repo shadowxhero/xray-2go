@@ -1,4 +1,4 @@
-# Xray-2go v2.1.4
+# Xray-2go v2.1.5
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -22,7 +22,15 @@ PORT=43013 RAW_PORT=43011 XHTTP_PORT=43012 \
   bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xray_2go.sh) --install
 ```
 
-`PORT` 是订阅端口；未设置 `RAW_PORT`、`XHTTP_PORT` 时分别使用 `PORT+1`、`PORT+2`。`ARGO_PORT` 默认 8080，仅供本机 cloudflared 回源。支持 `CFIP`、`CFPORT`、`UUID`、`SERVER_IP` 和 `NODE_NAME`。
+`PORT` 是订阅端口；未设置 `RAW_PORT`、`XHTTP_PORT` 时分别使用 `PORT+1`、`PORT+2`。`ARGO_PORT` 默认 8080，仅供本机 cloudflared 回源。支持 `CFIP`、`CFPORT`、`UUID`、`SERVER_IP`、`NODE_NAME` 和 `PROTOCOLS`。
+
+**`PROTOCOLS` 可以只装一部分协议**，例如只要两个直连 Reality、不装 Argo（省掉 cloudflared 的约 28MB 常驻内存）：
+
+```bash
+PROTOCOLS=raw-reality,xhttp-reality bash <(curl -fsSL .../xray_2go.sh) --install
+```
+
+可选值：`raw-reality`、`xhttp-reality`、`vless-argo`、`vmess-argo`。交互式安装会在选择「新安装」后再问一次，直接回车等于四个全装。
 
 **NAT 服务器必须在服务商面板配置端口映射。** 订阅和两个直连节点使用 TCP。修改机器内的监听端口并不会自动创建公网映射；Argo 内部端口不需要映射。
 
@@ -82,6 +90,7 @@ Xray 设置 `GOMEMLIMIT=32MiB`、`GOGC=20`；cloudflared 设置 `GOMEMLIMIT=20Mi
 2go --check
 2go --restart       # 临时隧道重新申请，有 60 秒冷却
 2go --health        # 读 argo.log 判定临时隧道存活，连续失败时重启隧道换域名
+2go --protocols       # 查看/切换协议，见「协议增删」
 2go --update        # 下载/校验并保存 GitHub 最新脚本，不重启服务
 2go --repair        # 只用本机版本修复服务，保留配置，可能重启原服务
 2go --upgrade       # 兼容旧命令，等同 --repair
@@ -139,6 +148,23 @@ xn--b6gac.eu.org
 排除：`cf.zhetengsha.eu.org`（无 A/AAAA）、`cfip.xxxxxxxx.tk`（NXDOMAIN）、`cdn.2020111.xyz`（SERVFAIL）、`bestcf.top`（转到域名到期地址，非正常入口）。这是当时的转发可用性结果，不是带宽排名，也不保证未来或所有运营商可用；不自动更换现有地址。
 
 固定隧道凭据通过服务器上的文件导入，不将 Token 粘贴到命令行。固定模式不会被旧临时隧道日志覆写。订阅只开放精确路径下的编码文本，不提供配置目录浏览。
+
+## 协议增删（v2.1.5）
+
+四个节点可以独立启停，不用重装。菜单 **4. 协议管理** 列出四项当前状态，选编号即切换；命令行等价写法：
+
+```bash
+2go --protocols                        # 查看四个协议的开关状态
+2go --protocols raw-reality,vless-argo # 只保留这两个
+```
+
+行为约定：
+
+- 切换会重建 Xray 配置、校验通过后重启 core，失败自动回滚到原配置和原协议列表；
+- **两个 Argo 协议都关闭时**，`argo-entry`/`fallback` 入站会被移除，`xray2go-tunnel` 随之停止并取消开机自启；重新打开任一 Argo 协议会再启用并重启它；
+- 直连协议删除后端口记在 `state.json` 的 `ports` 字段，加回来优先复用同一个端口；该端口被占用时才重新分配；
+- 最后一条协议不允许关闭（订阅会变成空的）；
+- 新增 Reality 协议时，若配置里已经没有可复用的私钥，会现场生成一对新的 x25519 密钥。
 
 ## 卸载
 

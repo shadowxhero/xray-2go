@@ -174,6 +174,59 @@ validate_xray_config() { jq -e '.inbounds|length>0' "$1" >/dev/null; }
         r = self.run_shell('curl() { cp "$work_dir/public/sub.txt" "${@: -1}"; }\nsleep() { :; }\nsubscription_probe\n', ok=False)
         self.assertNotEqual(r.returncode, 0)
 
+    def test_protocols_detect_reads_real_inbounds(self):
+        self.config['inbounds'] = [i for i in self.config['inbounds'] if i.get('tag') != 'vmess-ws']
+        (self.home / 'config.json').write_text(json.dumps(self.config))
+        self.run_shell(r'''
+out=$(protocols_detect | tr '\n' ' ')
+test "$out" = "raw-reality xhttp-reality vless-argo "
+''')
+
+    def test_protocols_normalize_orders_and_rejects_bad_input(self):
+        self.run_shell(r'''
+test "$(protocols_normalize "vless-argo,raw-reality" | tr '\n' ' ')" = "raw-reality vless-argo "
+! protocols_normalize "" >/dev/null 2>&1
+! protocols_normalize "raw-reality,bogus" >/dev/null 2>&1
+''')
+
+    def test_subscription_contains_only_enabled_protocols(self):
+        self.state['protocols'] = ['raw-reality', 'vless-argo']
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('generate_subscription\n')
+        ns = self.nodes()
+        self.assertEqual(len(ns), 2)
+        self.assertEqual(unquote(urlsplit(ns[0]).fragment), '东京 测试-RAW-Reality')
+        self.assertEqual(unquote(urlsplit(ns[1]).fragment), '东京 测试-VLESS-Argo')
+
+    def test_apply_protocols_drops_argo_inbounds_and_stops_tunnel(self):
+        self.run_shell(r'''
+service_enable() { :; }
+service_disable() { printf 'disable %s\n' "$1" >> "$CASE/actions"; }
+service_action() { printf 'action %s %s\n' "$1" "$2" >> "$CASE/actions"; }
+apply_protocols raw-reality,xhttp-reality
+jq -e '.inbounds|map(.tag)|sort == ["raw-reality","xhttp-reality"]' "$work_dir/config.json" >/dev/null
+jq -e '.protocols == ["raw-reality","xhttp-reality"]' "$work_dir/state.json" >/dev/null
+''')
+        actions = (self.d / 'actions').read_text()
+        self.assertIn('action xray2go-tunnel stop', actions)
+        self.assertIn('disable xray2go-tunnel', actions)
+
+    def test_apply_protocols_adds_missing_reality_back_with_remembered_port(self):
+        self.config['inbounds'] = [i for i in self.config['inbounds'] if i.get('tag') != 'raw-reality']
+        (self.home / 'config.json').write_text(json.dumps(self.config))
+        self.state['protocols'] = ['xhttp-reality']
+        self.state['ports'] = {'raw': 18432}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell(r'''
+service_enable() { :; }
+service_disable() { :; }
+service_action() { :; }
+new_reality_key() { printf 'fixture-private-key\n'; }
+apply_protocols xhttp-reality,raw-reality
+jq -e '.inbounds[]|select(.tag=="raw-reality")|.port == 18432' "$work_dir/config.json" >/dev/null
+jq -e '.inbounds[]|select(.tag=="raw-reality")|.settings.clients[0].flow == "xtls-rprx-vision"' "$work_dir/config.json" >/dev/null
+''')
+
     def test_validate_survives_busybox_mktemp_without_suffix_support(self):
         # Alpine 默认没有 coreutils：busybox mktemp 只接受以 XXXXXX 结尾的模板，
         # 传 ".validate.XXXXXX.json" 会直接报 "mktemp: : Invalid argument"。

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.4 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.5 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.4
+SCRIPT_VERSION=2.1.5
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -104,30 +104,106 @@ validate_xray_config() {
     rm -f "$check"; return "$result"
 }
 
+# 四个节点可独立启停。argo 的两个节点共用一条 cloudflared 隧道，
+# 只有两个都关闭时才停止 tunnel 服务；fallback/argo-entry 也一起移除。
+ALL_PROTOCOLS=(raw-reality xhttp-reality vless-argo vmess-argo)
+protocol_label() {
+    case "$1" in
+        raw-reality) printf 'VLESS RAW + REALITY + Vision' ;;
+        xhttp-reality) printf 'VLESS XHTTP + REALITY' ;;
+        vless-argo) printf 'VLESS WebSocket + Argo' ;;
+        vmess-argo) printf 'VMess WebSocket + Argo' ;;
+        *) return 1 ;;
+    esac
+}
+# 老版本 state 没有 protocols 字段，按真实入站反推，保证升级后状态与配置一致。
+protocols_detect() {
+    local list=()
+    [ -s "$config_dir" ] || { printf '%s\n' "${ALL_PROTOCOLS[@]}"; return 0; }
+    jq -e '.inbounds[]|select(.streamSettings.security=="reality" and (.streamSettings.network=="raw" or .streamSettings.network=="tcp"))' "$config_dir" >/dev/null 2>&1 && list+=(raw-reality)
+    jq -e '.inbounds[]|select(.streamSettings.security=="reality" and .streamSettings.network=="xhttp")' "$config_dir" >/dev/null 2>&1 && list+=(xhttp-reality)
+    jq -e '.inbounds[]|select(.tag=="vless-ws")' "$config_dir" >/dev/null 2>&1 && list+=(vless-argo)
+    jq -e '.inbounds[]|select(.tag=="vmess-ws")' "$config_dir" >/dev/null 2>&1 && list+=(vmess-argo)
+    [ "${#list[@]}" -gt 0 ] || list=("${ALL_PROTOCOLS[@]}")
+    printf '%s\n' "${list[@]}"
+}
+protocols_current() {
+    local stored
+    stored=$(jq -r 'if (.protocols|type)=="array" then .protocols[] else empty end' "$state_file" 2>/dev/null)
+    if [ -n "$stored" ]; then printf '%s\n' "$stored"; else protocols_detect; fi
+}
+protocol_enabled() {
+    local want=$1 p
+    for p in $(protocols_current); do [ "$p" = "$want" ] && return 0; done
+    return 1
+}
+protocols_joined() { printf '%s\n' "$(protocols_current)" | paste -sd, - 2>/dev/null || printf '%s\n' "$(protocols_current)" | tr '\n' ',' | sed 's/,$//'; }
+protocol_listed() {
+    local want=$1 list=${2//$'\n'/ } item
+    for item in $list; do [ "$item" = "$want" ] && return 0; done
+    return 1
+}
+protocols_state_set() {
+    local json
+    json=$(printf '%s\n' "$@" | jq -R . | jq -sc .) || return 1
+    state_set protocols "$json"
+}
+protocols_normalize() {
+    # 校验并规范化为 ALL_PROTOCOLS 的顺序，去重、忽略未知项。
+    local raw=$1 out=() item p found
+    local items=(${raw//,/ })
+    for item in "${items[@]}"; do
+        found=0
+        for p in "${ALL_PROTOCOLS[@]}"; do [ "$item" = "$p" ] && { found=1; break; }; done
+        [ "$found" = 1 ] || { red "未知协议：$item（可选：${ALL_PROTOCOLS[*]}）"; return 1; }
+    done
+    for p in "${ALL_PROTOCOLS[@]}"; do
+        for item in "${items[@]}"; do [ "$item" = "$p" ] && { out+=("$p"); break; }; done
+    done
+    [ "${#out[@]}" -gt 0 ] || { red '至少要保留一个协议。'; return 1; }
+    printf '%s\n' "${out[@]}"
+}
+any_argo_protocol() { protocol_enabled vless-argo || protocol_enabled vmess-argo; }
+
 # 始终由真实入站和持久状态重新导出，不对 URI 做固定行号/IPv4 正则替换。
 generate_subscription() { with_lock generate_subscription_unlocked; }
 generate_subscription_unlocked() {
-    local pub server cdn cp domain name raw xhttp id vless_raw vless_xhttp vm tmp sub a b c d
+    local pub server cdn cp domain name raw xhttp id vless_raw vless_xhttp vm tmp sub a b c d enabled
+    local -a lines=()
     server=$(state server) || return 1; server=$(host_uri "$server")
     cdn=$(state cdn) || return 1; cdn=$(host_uri "$cdn")
     cp=$(state cdn_port); domain=$(state tunnel_domain) || domain=''
     name=$(state name) || name=vps
-    raw=$(jq -ce '.inbounds[]|select(.protocol=="vless" and .streamSettings.security=="reality" and (.streamSettings.network=="raw" or .streamSettings.network=="tcp"))' "$config_dir") || return 1
-    xhttp=$(jq -ce '.inbounds[]|select(.protocol=="vless" and .streamSettings.security=="reality" and .streamSettings.network=="xhttp")' "$config_dir") || return 1
+    enabled=$(protocols_current)
     a=$(uri "$name-RAW-Reality"); b=$(uri "$name-XHTTP-Reality"); c=$(uri "$name-VLESS-Argo")
-    id=$(jq -er '.settings.clients[0].id' <<< "$raw") || return 1
-    pub=$(derive_public_key "$(jq -r '.streamSettings.realitySettings.privateKey' <<< "$raw")") || return 1
-    vless_raw="vless://$id@$server:$(jq -r .port <<< "$raw")?encryption=none&security=reality&sni=$(uri "$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<< "$raw")")&fp=chrome&pbk=$pub&type=tcp&headerType=none&flow=xtls-rprx-vision&sid=$(jq -r '.streamSettings.realitySettings.shortIds[0] // ""' <<< "$raw")#$a"
-    id=$(jq -er '.settings.clients[0].id' <<< "$xhttp") || return 1
-    pub=$(derive_public_key "$(jq -r '.streamSettings.realitySettings.privateKey' <<< "$xhttp")") || return 1
-    vless_xhttp="vless://$id@$server:$(jq -r .port <<< "$xhttp")?encryption=none&security=reality&sni=$(uri "$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<< "$xhttp")")&fp=chrome&pbk=$pub&type=xhttp&mode=auto&sid=$(jq -r '.streamSettings.realitySettings.shortIds[0] // ""' <<< "$xhttp")#$b"
-    id=$(jq -er '.inbounds[]|select(.protocol=="vless" and .streamSettings.network=="ws")|.settings.clients[0].id' "$config_dir") || return 1
-    d="vless://$id@$cdn:$cp?encryption=none&security=tls&sni=$(uri "$domain")&fp=chrome&type=ws&host=$(uri "$domain")&path=%2Fvless-argo%3Fed%3D2560#$c"
-    id=$(jq -er '.inbounds[]|select(.protocol=="vmess")|.settings.clients[0].id' "$config_dir") || return 1
-    vm=$(jq -cn --arg name "$name-VMess-Argo" --arg address "$(state cdn)" --arg port "$cp" --arg uuid "$id" --arg domain "$domain" '{v:"2",ps:$name,add:$address,port:$port,id:$uuid,aid:"0",scy:"aes-128-gcm",net:"ws",type:"none",host:$domain,path:"/vmess-argo?ed=2560",tls:"tls",sni:$domain,alpn:"",fp:"chrome"}' | base64 | tr -d '\n') || return 1
+    if protocol_listed raw-reality "$enabled"; then
+        raw=$(jq -ce '.inbounds[]|select(.protocol=="vless" and .streamSettings.security=="reality" and (.streamSettings.network=="raw" or .streamSettings.network=="tcp"))' "$config_dir") || return 1
+        id=$(jq -er '.settings.clients[0].id' <<< "$raw") || return 1
+        pub=$(derive_public_key "$(jq -r '.streamSettings.realitySettings.privateKey' <<< "$raw")") || return 1
+        vless_raw="vless://$id@$server:$(jq -r .port <<< "$raw")?encryption=none&security=reality&sni=$(uri "$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<< "$raw")")&fp=chrome&pbk=$pub&type=tcp&headerType=none&flow=xtls-rprx-vision&sid=$(jq -r '.streamSettings.realitySettings.shortIds[0] // ""' <<< "$raw")#$a"
+        lines+=("$vless_raw")
+    fi
+    if protocol_listed xhttp-reality "$enabled"; then
+        xhttp=$(jq -ce '.inbounds[]|select(.protocol=="vless" and .streamSettings.security=="reality" and .streamSettings.network=="xhttp")' "$config_dir") || return 1
+        id=$(jq -er '.settings.clients[0].id' <<< "$xhttp") || return 1
+        pub=$(derive_public_key "$(jq -r '.streamSettings.realitySettings.privateKey' <<< "$xhttp")") || return 1
+        vless_xhttp="vless://$id@$server:$(jq -r .port <<< "$xhttp")?encryption=none&security=reality&sni=$(uri "$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<< "$xhttp")")&fp=chrome&pbk=$pub&type=xhttp&mode=auto&sid=$(jq -r '.streamSettings.realitySettings.shortIds[0] // ""' <<< "$xhttp")#$b"
+        lines+=("$vless_xhttp")
+    fi
+    if protocol_listed vless-argo "$enabled"; then
+        id=$(jq -er '.inbounds[]|select(.tag=="vless-ws")|.settings.clients[0].id' "$config_dir") || return 1
+        d="vless://$id@$cdn:$cp?encryption=none&security=tls&sni=$(uri "$domain")&fp=chrome&type=ws&host=$(uri "$domain")&path=%2Fvless-argo%3Fed%3D2560#$c"
+        lines+=("$d")
+    fi
+    if protocol_listed vmess-argo "$enabled"; then
+        id=$(jq -er '.inbounds[]|select(.tag=="vmess-ws")|.settings.clients[0].id' "$config_dir") || return 1
+        vm=$(jq -cn --arg name "$name-VMess-Argo" --arg address "$(state cdn)" --arg port "$cp" --arg uuid "$id" --arg domain "$domain" '{v:"2",ps:$name,add:$address,port:$port,id:$uuid,aid:"0",scy:"aes-128-gcm",net:"ws",type:"none",host:$domain,path:"/vmess-argo?ed=2560",tls:"tls",sni:$domain,alpn:"",fp:"chrome"}' | base64 | tr -d '\n') || return 1
+        lines+=("vmess://$vm")
+    fi
+    [ "${#lines[@]}" -gt 0 ] || { red '没有启用任何协议，订阅无法生成。'; return 1; }
     mkdir -p "$work_dir/public"; chmod 755 "$work_dir/public"
     tmp=$(mktemp "$work_dir/.urls.XXXXXX"); sub=$(mktemp "$work_dir/public/.sub.XXXXXX") || return 1
-    printf '%s\n%s\n%s\nvmess://%s\n' "$vless_raw" "$vless_xhttp" "$d" "$vm" > "$tmp"
+    printf '%s\n' "${lines[@]}" > "$tmp"
     base64 < "$tmp" | tr -d '\n' > "$sub" || { rm -f "$tmp" "$sub"; return 1; }
     chmod 600 "$tmp"; chmod 644 "$sub"
     # 下载只读 public/sub.txt；先生成完整文件再 rename，不暴露半条节点。
@@ -172,6 +248,139 @@ apply_xray_config() {
         return 1
     fi
     rm -f "$backup"
+}
+
+# ---- 协议增删（运行时） ----
+pick_free_port() {
+    local i p
+    for i in $(seq 1 100); do
+        p=$(random_port_candidate)
+        case "$p" in 3001|3002|3003) continue ;; esac
+        port_available "$p" && { printf '%s\n' "$p"; return 0; }
+    done
+    return 1
+}
+# 端口记忆：删掉协议后仍保留在 state.ports，加回来时优先复用同一个端口。
+protocol_port_get() {
+    local name=$1 p
+    p=$(jq -r --arg k "$name" '.ports[$k] // empty' "$state_file" 2>/dev/null)
+    if [ -z "$p" ]; then
+        if [ "$name" = raw ]; then
+            p=$(jq -r '(.inbounds[]|select(.streamSettings.security=="reality" and (.streamSettings.network=="raw" or .streamSettings.network=="tcp"))).port // empty' "$config_dir" 2>/dev/null | head -1)
+        else
+            p=$(jq -r '(.inbounds[]|select(.streamSettings.security=="reality" and .streamSettings.network=="xhttp")).port // empty' "$config_dir" 2>/dev/null | head -1)
+        fi
+    fi
+    [ -n "$p" ] && printf '%s\n' "$p"
+}
+protocol_port_remember() {
+    local k=$1 p=$2 t
+    [ -n "$p" ] || return 0
+    t=$(mktemp "$work_dir/.state.XXXXXX") || return 1
+    jq --arg k "$k" --argjson p "$p" '.ports = ((.ports // {}) + {($k): $p})' "$state_file" > "$t" \
+        && chmod 600 "$t" && mv "$t" "$state_file" || { rm -f "$t"; return 1; }
+}
+reality_field() {
+    local network=$1 field=$2
+    if [ "$network" = raw ]; then
+        jq -r --arg f "$field" '(.inbounds[]|select(.streamSettings.security=="reality" and (.streamSettings.network=="raw" or .streamSettings.network=="tcp")))|if $f=="sni" then (.streamSettings.realitySettings.serverNames[0] // "") else .streamSettings.realitySettings.privateKey end' "$config_dir" 2>/dev/null | head -1
+    else
+        jq -r --arg f "$field" '(.inbounds[]|select(.streamSettings.security=="reality" and .streamSettings.network=="xhttp"))|if $f=="sni" then (.streamSettings.realitySettings.serverNames[0] // "") else .streamSettings.realitySettings.privateKey end' "$config_dir" 2>/dev/null | head -1
+    fi
+}
+new_reality_key() {
+    local output priv
+    output=$("$work_dir/xray" x25519) || return 1
+    priv=$(printf '%s\n' "$output" | awk '/^PrivateKey/{print $NF}')
+    [ -n "$priv" ] && printf '%s\n' "$priv"
+}
+protocol_uuid() {
+    jq -r '[.inbounds[].settings.clients[]?.id]|map(select(.!=null))|first // empty' "$config_dir" 2>/dev/null
+}
+apply_protocols() { with_lock apply_protocols_unlocked "$@"; }
+apply_protocols_unlocked() {
+    local wanted old candidate uuid argo_port p priv snin vl vm old_joined new_joined
+    local -a wanted_arr=() old_arr=()
+    wanted=$(protocols_normalize "$1") || return 1
+    while IFS= read -r line; do [ -n "$line" ] && wanted_arr+=("$line"); done <<< "$wanted"
+    old=$(protocols_current)
+    while IFS= read -r line; do [ -n "$line" ] && old_arr+=("$line"); done <<< "$old"
+    old_joined="${old_arr[*]}"; new_joined="${wanted_arr[*]}"
+    [ "$old_joined" = "$new_joined" ] && { green '协议未变化。'; return 0; }
+    uuid=$(protocol_uuid); [ -n "$uuid" ] || { red '配置里找不到 UUID。'; return 1; }
+    argo_port=$(state argo_port) || argo_port=8080
+    candidate=$(mktemp "$work_dir/.config.XXXXXX") || return 1
+    cp -p "$config_dir" "$candidate" || { rm -f "$candidate"; return 1; }
+
+    if protocol_listed raw-reality "$wanted"; then
+        if ! jq -e '.inbounds[]|select(.tag=="raw-reality")' "$candidate" >/dev/null 2>&1; then
+            p=$(protocol_port_get raw); [ -n "$p" ] || p=$(pick_free_port)
+            priv=$(reality_field raw privateKey); [ -n "$priv" ] || priv=$(new_reality_key)
+            snin=$(reality_field raw sni); [ -n "$snin" ] || snin=$(reality_field xhttp sni); [ -n "$snin" ] || snin=www.iij.ad.jp
+            if [ -z "$p" ] || [ -z "$priv" ]; then rm -f "$candidate"; red '无法为 RAW 协议分配端口或密钥。'; return 1; fi
+            jq --arg id "$uuid" --arg priv "$priv" --arg snin "$snin" --argjson port "$p" '.inbounds += [{tag:"raw-reality",port:$port,protocol:"vless",settings:{clients:[{id:$id,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"raw",security:"reality",realitySettings:{target:($snin+":443"),serverNames:[$snin],privateKey:$priv,shortIds:[""]}}}]' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+            protocol_port_remember raw "$p"
+        fi
+    else
+        p=$(protocol_port_get raw)
+        jq 'del(.inbounds[]|select(.tag=="raw-reality"))' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+        protocol_port_remember raw "$p"
+    fi
+
+    if protocol_listed xhttp-reality "$wanted"; then
+        if ! jq -e '.inbounds[]|select(.tag=="xhttp-reality")' "$candidate" >/dev/null 2>&1; then
+            p=$(protocol_port_get xhttp); [ -n "$p" ] || p=$(pick_free_port)
+            priv=$(reality_field xhttp privateKey); [ -n "$priv" ] || priv=$(new_reality_key)
+            snin=$(reality_field xhttp sni); [ -n "$snin" ] || snin=$(reality_field raw sni); [ -n "$snin" ] || snin=www.nazhumi.com
+            if [ -z "$p" ] || [ -z "$priv" ]; then rm -f "$candidate"; red '无法为 XHTTP 协议分配端口或密钥。'; return 1; fi
+            jq --arg id "$uuid" --arg priv "$priv" --arg snin "$snin" --argjson port "$p" '.inbounds += [{tag:"xhttp-reality",port:$port,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"xhttp",security:"reality",realitySettings:{target:($snin+":443"),serverNames:[$snin],privateKey:$priv,shortIds:[""]}}}]' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+            protocol_port_remember xhttp "$p"
+        fi
+    else
+        p=$(protocol_port_get xhttp)
+        jq 'del(.inbounds[]|select(.tag=="xhttp-reality"))' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+        protocol_port_remember xhttp "$p"
+    fi
+
+    if protocol_listed vless-argo "$wanted"; then
+        if ! jq -e '.inbounds[]|select(.tag=="vless-ws")' "$candidate" >/dev/null 2>&1; then
+            jq --arg id "$uuid" '.inbounds += [{tag:"vless-ws",listen:"127.0.0.1",port:3002,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"ws",wsSettings:{path:"/vless-argo"}}}]' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+        fi
+    else
+        jq 'del(.inbounds[]|select(.tag=="vless-ws"))' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+    fi
+
+    if protocol_listed vmess-argo "$wanted"; then
+        if ! jq -e '.inbounds[]|select(.tag=="vmess-ws")' "$candidate" >/dev/null 2>&1; then
+            jq --arg id "$uuid" '.inbounds += [{tag:"vmess-ws",listen:"127.0.0.1",port:3003,protocol:"vmess",settings:{clients:[{id:$id}]},streamSettings:{network:"ws",wsSettings:{path:"/vmess-argo"}}}]' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+        fi
+    else
+        jq 'del(.inbounds[]|select(.tag=="vmess-ws"))' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+    fi
+
+    # argo-entry/fallback 每次重建，保证 fallbacks 只指向真正启用的路径。
+    jq 'del(.inbounds[]|select(.tag=="argo-entry" or .tag=="fallback"))' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+    if protocol_listed vless-argo "$wanted" || protocol_listed vmess-argo "$wanted"; then
+        vl=0; vm=0
+        protocol_listed vless-argo "$wanted" && vl=1
+        protocol_listed vmess-argo "$wanted" && vm=1
+        jq --arg id "$uuid" --argjson ap "$argo_port" --argjson vl "$vl" --argjson vm "$vm" '.inbounds += [{tag:"argo-entry",listen:"127.0.0.1",port:$ap,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none",fallbacks:([{dest:3001}]+(if $vl==1 then [{path:"/vless-argo",dest:3002}] else [] end)+(if $vm==1 then [{path:"/vmess-argo",dest:3003}] else [] end))},streamSettings:{network:"raw"}},{tag:"fallback",listen:"127.0.0.1",port:3001,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"raw"}}]' "$candidate" > "$candidate.new" && mv "$candidate.new" "$candidate" || { rm -f "$candidate" "$candidate.new"; return 1; }
+    fi
+
+    protocols_state_set "${wanted_arr[@]}" || { rm -f "$candidate"; return 1; }
+    if ! apply_xray_config "$candidate"; then
+        protocols_state_set "${old_arr[@]}" || true
+        red '协议变更未生效，已恢复原状态。'
+        return 1
+    fi
+    if protocol_listed vless-argo "$wanted" || protocol_listed vmess-argo "$wanted"; then
+        service_enable xray2go-tunnel >/dev/null 2>&1 || true
+        service_action xray2go-tunnel restart || true
+    else
+        service_action xray2go-tunnel stop || true
+        service_disable xray2go-tunnel || true
+    fi
+    green "已启用协议：${new_joined}"
 }
 set_direct_port() { with_lock set_direct_port_unlocked "$@"; }
 set_direct_port_unlocked() {
@@ -640,6 +849,7 @@ configure_services() {
         if [ -n "${UPGRADE_BACKUP:-}" ] && { [ -f "$UPGRADE_BACKUP/old-openrc-$s" ] || [ -f "$UPGRADE_BACKUP/old-systemd-$s.service" ]; }; then
             if [ -f "$UPGRADE_BACKUP/enabled-$s" ]; then service_enable "$s"; else service_disable "$s"; fi
         elif [ "$s" = xray2go-sub ] && ! jq -e .subscription_enabled "$state_file" >/dev/null; then service_disable "$s"
+        elif [ "$s" = xray2go-tunnel ] && ! any_argo_protocol; then service_disable "$s"
         else service_enable "$s" || return 1; fi
     done
 }
@@ -647,6 +857,7 @@ start_services() {
     local s old action
     for s in "${SERVICES[@]}"; do
         if [ "$s" = xray2go-sub ] && ! jq -e .subscription_enabled "$state_file" >/dev/null; then continue; fi
+        if [ "$s" = xray2go-tunnel ] && ! any_argo_protocol; then continue; fi
         action=start
         if [ -n "${UPGRADE_BACKUP:-}" ]; then
             if [ -f "$UPGRADE_BACKUP/old-openrc-$s" ] || [ -f "$UPGRADE_BACKUP/old-systemd-$s.service" ]; then
@@ -792,6 +1003,9 @@ install_fresh() (
     jq -n --arg id "$uuid" --arg private "$private" --argjson raw "$rawp" --argjson xh "$xhp" --argjson ap "$ap" '{log:{access:"/dev/null",error:"/dev/null",loglevel:"none"},inbounds:[{tag:"argo-entry",listen:"127.0.0.1",port:$ap,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none",fallbacks:[{dest:3001},{path:"/vless-argo",dest:3002},{path:"/vmess-argo",dest:3003}]},streamSettings:{network:"raw"}},{tag:"fallback",listen:"127.0.0.1",port:3001,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"raw"}},{tag:"vless-ws",listen:"127.0.0.1",port:3002,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"ws",wsSettings:{path:"/vless-argo"}}},{tag:"vmess-ws",listen:"127.0.0.1",port:3003,protocol:"vmess",settings:{clients:[{id:$id}]},streamSettings:{network:"ws",wsSettings:{path:"/vmess-argo"}}},{tag:"raw-reality",port:$raw,protocol:"vless",settings:{clients:[{id:$id,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"raw",security:"reality",realitySettings:{target:"www.iij.ad.jp:443",serverNames:["www.iij.ad.jp"],privateKey:$private,shortIds:[""]}}},{tag:"xhttp-reality",port:$xh,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"xhttp",security:"reality",realitySettings:{target:"www.nazhumi.com:443",serverNames:["www.nazhumi.com"],privateKey:$private,shortIds:[""]}}}],outbounds:[{protocol:"freedom",tag:"direct"}]}' > "$config_dir"
     validate_xray_config "$config_dir" || return 1
     jq -n --arg name "$name" --arg server "$server" --arg cdn "${CFIP:-cdns.doon.eu.org}" --argjson cp "${CFPORT:-443}" --arg path "$(random_path)" --argjson sp "$subp" --argjson ap "$ap" '{version:2,name:$name,server:$server,cdn:$cdn,cdn_port:$cp,subscription_port:$sp,subscription_path:$path,subscription_enabled:true,tunnel_mode:"quick",tunnel_domain:"",argo_port:$ap}' > "$state_file"
+    protocols_state_set "${ALL_PROTOCOLS[@]}" || return 1
+    # 只装部分协议时（PROTOCOLS=raw-reality,vless-argo），安装阶段就把其余入站裁掉。
+    if [ -n "${PROTOCOLS:-}" ]; then apply_protocols_unlocked "$PROTOCOLS" || return 1; fi
     generate_subscription; write_nginx_config
     nginx -t -c "$work_dir/nginx.conf" >/dev/null 2>&1 || return 1
     install_runtime_copy && configure_services && start_services || return 1
@@ -1011,7 +1225,7 @@ menu_option_allowed() {
     local status=$1 choice=$2
     case "$choice" in 0|h|H) return 0;;esac
     case "$status:$choice" in
-        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16|installed:17) return 0;;
+        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16|installed:17|installed:18) return 0;;
         partial:2) [ -x "$work_dir/xray" ] && [ -s "$config_dir" ] && [ -s "$client_dir" ];return $?;;
         *) return 1;;
     esac
@@ -1027,24 +1241,25 @@ render_menu() {
             if menu_option_allowed partial 2;then menu_color 33 '2. 修复/迁移现有安装（先备份）';else menu_color 33 '配置或内核缺失，暂不提供修改/卸载入口，请先检查安装记录。';fi;;
         installed)
             menu_color 32 '2. 在线更新脚本（不重启服务）'
-            menu_color 32 '17. 修复当前服务（本机版本，保留配置）'
+            menu_color 32 '18. 修复当前服务（本机版本，保留配置）'
             menu_color 32 '3. 查看节点与订阅'
-            menu_color 32 '4. 修改节点名称'
+            menu_color 32 '4. 协议管理（增删节点）'
+            menu_color 32 '5. 修改节点名称'
             menu_separator
-            menu_color 32 '5. 修改 RAW 端口'
-            menu_color 32 '6. 修改 XHTTP 端口'
-            menu_color 32 '7. 修改订阅端口'
-            menu_color 32 '8. 订阅启用/关闭'
+            menu_color 32 '6. 修改 RAW 端口'
+            menu_color 32 '7. 修改 XHTTP 端口'
+            menu_color 32 '8. 修改订阅端口'
+            menu_color 32 '9. 订阅启用/关闭'
             menu_separator
-            menu_color 32 '9. 服务启停'
-            menu_color 32 '10. 隧道管理'
-            menu_color 32 '11. 修改 UUID'
-            menu_color 32 '12. 修改 Reality SNI'
-            menu_color 32 '13. 修改 Argo 优选地址/端口'
-            menu_color 32 '14. 修改直连 IP（IPv4/IPv6）'
-            menu_color 32 '15. 修改 Argo 内部端口'
+            menu_color 32 '10. 服务启停'
+            menu_color 32 '11. 隧道管理'
+            menu_color 32 '12. 修改 UUID'
+            menu_color 32 '13. 修改 Reality SNI'
+            menu_color 32 '14. 修改 Argo 优选地址/端口'
+            menu_color 32 '15. 修改直连 IP（IPv4/IPv6）'
+            menu_color 32 '16. 修改 Argo 内部端口'
             menu_separator
-            menu_color 31 '16. 卸载';;
+            menu_color 31 '17. 卸载';;
     esac
     menu_separator
     menu_color 35 'h. 帮助'
@@ -1193,6 +1408,45 @@ interactive_tunnel() {
     esac || { red '隧道操作失败，未确认成功。';return 1; }
     green '隧道操作已提交。若重新申请临时域名，同步器会自动更新两个 Argo 节点；Cloudflare 限流时不会立即恢复。'
 }
+interactive_protocols() {
+    local choice i p cur next
+    while true; do
+        menu_color 32 '=== 协议管理 ==='
+        i=1
+        for p in "${ALL_PROTOCOLS[@]}"; do
+            if protocol_enabled "$p"; then
+                menu_color 32 "$i. [已启用] $(protocol_label "$p")"
+            else
+                menu_color 33 "$i. [已关闭] $(protocol_label "$p")"
+            fi
+            i=$((i+1))
+        done
+        menu_color 35 '0. 返回'
+        menu_color 33 '切换会重建 Xray 配置并重启 core；两个 Argo 协议都关闭时连带停止 cloudflared。'
+        reading '选择要切换的协议：' choice || return 1
+        case "$choice" in
+            0) return 0 ;;
+            1|2|3|4)
+                p="${ALL_PROTOCOLS[$((choice-1))]}"
+                cur=$(protocols_current)
+                if protocol_listed "$p" "$cur"; then
+                    next=$(printf '%s\n' "$cur" | grep -vx "$p" | tr '\n' ',' | sed 's/,$//')
+                    [ -n "$next" ] || { red '至少要保留一个协议。'; continue; }
+                else
+                    next=$(printf '%s\n%s\n' "$cur" "$p" | tr '\n' ',' | sed 's/,$//')
+                fi
+                if apply_protocols "$next"; then
+                    green "当前协议：$(protocols_joined)"
+                    show_nodes
+                else
+                    red '协议变更失败，配置已回滚。'
+                fi
+                ;;
+            *) red '无效选项' ;;
+        esac
+        menu_pause
+    done
+}
 valid_ipv4() {
     local v=$1 a part
     [[ "$v" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
@@ -1243,7 +1497,7 @@ menu_pause() {
     if [ -t 0 ];then read -n 1 -s -r -p $'\033[1;91m按任意键返回主菜单…\033[0m' || true;printf '\n';fi
 }
 menu() {
-    local choice value network h p mode domain file status
+    local choice value network h p mode domain file status proto
     while true; do
         [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ] || clear
         render_menu
@@ -1253,24 +1507,26 @@ menu() {
             red '该选项在当前安装状态不可用，请选择屏幕中显示的选项。';menu_pause;continue
         fi
         case "$choice" in
-            1) install_fresh ;;
+            1) reading '协议（回车=全部四个；或输入如 raw-reality,vless-argo）：' proto || true
+               if [ -n "${proto:-}" ];then PROTOCOLS="$proto" install_fresh;else install_fresh;fi ;;
             2) if [ "$status" = installed ];then
                    if online_update;then green '重新运行 2go 进入更新后的菜单。';return 0;fi
                else upgrade_installation;fi ;;
-            17) upgrade_installation ;;
+            18) upgrade_installation ;;
             3) show_nodes ;;
-            4) reading '基础名：' value && with_lock rename_nodes "$value" && { green '节点名称已更新。';show_nodes; } ;;
-            5|6) network=raw; [ "$choice" != 6 ] || network=xhttp; interactive_port "$network" ;;
-            7) interactive_port sub ;;
-            8) interactive_subscription ;;
-            9) interactive_services ;;
-            10) interactive_tunnel ;;
-            11) reading '新 UUID（留空随机生成）：' value && set_uuid "${value:-$(random_uuid)}" && { green 'UUID 已更新，请更新客户端订阅。';show_nodes; } ;;
-            12) interactive_sni ;;
-            13) interactive_cdn ;;
-            14) interactive_address ;;
-            15) interactive_port argo ;;
-            16) reading '确认卸载本脚本并归档配置？输入 yes：' value;[ "$value" != yes ] || uninstall_owned ;;
+            4) interactive_protocols ;;
+            5) reading '基础名：' value && with_lock rename_nodes "$value" && { green '节点名称已更新。';show_nodes; } ;;
+            6|7) network=raw; [ "$choice" != 7 ] || network=xhttp; interactive_port "$network" ;;
+            8) interactive_port sub ;;
+            9) interactive_subscription ;;
+            10) interactive_services ;;
+            11) interactive_tunnel ;;
+            12) reading '新 UUID（留空随机生成）：' value && set_uuid "${value:-$(random_uuid)}" && { green 'UUID 已更新，请更新客户端订阅。';show_nodes; } ;;
+            13) interactive_sni ;;
+            14) interactive_cdn ;;
+            15) interactive_address ;;
+            16) interactive_port argo ;;
+            17) reading '确认卸载本脚本并归档配置？输入 yes：' value;[ "$value" != yes ] || uninstall_owned ;;
             0) return 0 ;;
             h|H) main --help ;;
             *) red '无效选项' ;;
@@ -1284,7 +1540,7 @@ rename_nodes() { [ -n "$1" ] && state_string name "$1" && generate_subscription_
 main() {
     case "${1:-}" in
         --version) printf '%s\n' "$SCRIPT_VERSION"; return;;
-        -h|--help) printf '2go [-i|--install] [--update] [--repair|--upgrade] [-c|--check] [-r|--restart] [-u|--uninstall] [--sync] [--health] [--version]\n--update 下载并保存 GitHub 最新脚本，不重启服务或更新内核。\n--repair/--upgrade 使用当前运行版本修复或迁移服务，保留配置，可能重启服务。\n--health 探测临时隧道是否还活着，连续 60 秒级失败三次才重启隧道换域名。\n';return;;
+        -h|--help) printf '2go [-i|--install] [--update] [--repair|--upgrade] [-c|--check] [-r|--restart] [-u|--uninstall] [--sync] [--health] [--protocols [列表]] [--version]\n--update 下载并保存 GitHub 最新脚本，不重启服务或更新内核。\n--repair/--upgrade 使用当前运行版本修复或迁移服务，保留配置，可能重启服务。\n--health 探测临时隧道是否还活着，连续 60 秒级失败三次才重启隧道换域名。\n--protocols 查看协议开关；带列表时切换，例如 --protocols raw-reality,vless-argo（可选：%s）。\n' "${ALL_PROTOCOLS[*]}";return;;
     esac
     require_root || return 1
     case "${1:-}" in
@@ -1298,6 +1554,16 @@ main() {
         -r|--restart) renew_tunnel;;
         -u|--uninstall) uninstall_owned;;
         --sync) sync_subscription;;
+        --protocols)
+            if [ -n "${2:-}" ]; then apply_protocols "$2"
+            else
+                [ -f "$work_dir/.installed" ] || { red '尚未安装。'; return 1; }
+                while IFS= read -r p; do
+                    [ -n "$p" ] || continue
+                    if protocol_enabled "$p"; then printf '已启用\t%s\t%s\n' "$p" "$(protocol_label "$p")"
+                    else printf '已关闭\t%s\t%s\n' "$p" "$(protocol_label "$p")"; fi
+                done <<< "$(printf '%s\n' "${ALL_PROTOCOLS[@]}")"
+            fi ;;
         --health) tunnel_health;;
         --tunnel-worker) tunnel_worker;;
         '') refresh_script_on_launch && menu;;

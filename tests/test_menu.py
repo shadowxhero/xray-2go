@@ -44,7 +44,7 @@ service_status() { return 1; }
         self.assertIn('1. 新安装',plain)
         self.assertIn('h. 帮助',plain)
         self.assertNotIn('修改 RAW',plain)
-        self.assertNotIn('16. 卸载',plain)
+        self.assertNotIn('17. 卸载',plain)
         self.assertNotIn('已停止',plain)
 
     def test_hidden_edit_option_cannot_execute_on_absent_installation(self):
@@ -75,8 +75,9 @@ service_status() { return 1; }
         plain=ANSI.sub('',self.shell('render_menu\n'))
         self.assertIn('已安装',plain)
         self.assertIn('已停止',plain)
-        self.assertIn('4. 修改节点名称',plain)
-        self.assertIn('16. 卸载',plain)
+        self.assertIn('4. 协议管理（增删节点）',plain)
+        self.assertIn('5. 修改节点名称',plain)
+        self.assertIn('17. 卸载',plain)
         self.assertNotIn('1. 新安装',plain)
 
     def test_running_and_missing_service_have_distinct_labels(self):
