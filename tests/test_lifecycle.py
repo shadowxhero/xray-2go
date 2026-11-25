@@ -521,6 +521,19 @@ test ! -f "$work_dir/.health-fails"
 test ! -f "$CASE/actions"
 ''')
 
+    def test_tunnel_health_skips_probe_when_no_argo_protocol_enabled(self):
+        self.state['protocols'] = ['xhttp-reality']
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell(r'''
+tunnel_probe() { printf x >> "$CASE/probes"; return 1; }
+service_status() { return 0; }
+service_action() { printf '%s %s\n' "$1" "$2" >> "$CASE/actions"; }
+rm -f "$work_dir/.health-ts"
+tunnel_health
+test ! -f "$CASE/probes"
+test ! -f "$CASE/actions"
+''')
+
     def test_tunnel_health_skips_fixed_tunnel(self):
         self.state.update(tunnel_mode='token', tunnel_domain='fixed.example.com')
         (self.home / 'state.json').write_text(json.dumps(self.state))

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.8 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.9 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.8
+SCRIPT_VERSION=2.1.9
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -1107,6 +1107,9 @@ tunnel_probe() {
 }
 tunnel_health() {
     [ "$(state tunnel_mode)" = quick ] || return 0
+    # 关掉两个 Argo 协议时 tunnel 已停止并取消自启，argo.log 是过期的，
+    # 继续探测只会读到旧信号（甚至误判），这里直接短路。
+    any_argo_protocol || return 0
     local domain now ts=0 last=0 fails=0
     domain=$(state tunnel_domain) || return 0
     [ -n "$domain" ] || return 0
