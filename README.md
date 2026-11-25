@@ -106,6 +106,8 @@ Xray 设置 `GOMEMLIMIT=32MiB`、`GOGC=20`；cloudflared 设置 `GOMEMLIMIT=20Mi
 
 **v2.1.3 用 `oom_score_adj` 把 OOM 的刀口挪到同步器上**。实测那台机的 `memory.current` 里 `anon` 只有 29MB，其余 77MB 是 xray(35MB)+cloudflared(40MB) 二进制的页缓存；OOM 并不挑“吃内存最多的坏进程”，而是按占用排序挑，于是两条关键链路总是先死。调整优先级后内存告急时先杀同步器（5 秒内被 `supervise-daemon` 拉起，不改任何状态），隧道域名不再变化，客户端的订阅也就不再作废。
 
+**容器里这条保护只生效一半**：把 `oom_score_adj` 调成负值需要 `CAP_SYS_RESOURCE`，普通 LXC 容器没有该能力，写入会被拒绝（`Permission denied`，被 `start_pre` 的 `return 0` 吞掉，不影响服务启动）。所以容器内实际生效的只有同步器的 `+500`（`oom_score` 拉满到 1000，排序上始终先于 `xray`/`cloudflared`）；真正降低 OOM 概率还要靠 cgroup 的 `memory.high` 提前回收页缓存。
+
 **升级后需要重建服务**（`2go --repair` 或菜单 17）才会写入新的 `sync-loop.sh`；只执行 `--update` 仅保存脚本，已经运行的同步循环内容不会改变。
 
 ### 恢复的交互方式（v2.0.6）
