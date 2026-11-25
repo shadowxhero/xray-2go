@@ -182,6 +182,20 @@ out=$(protocols_detect | tr '\n' ' ')
 test "$out" = "raw-reality xhttp-reality vless-argo "
 ''')
 
+    def test_protocols_from_digits_accepts_compact_input(self):
+        self.run_shell(r'''
+test "$(protocols_from_digits 13)" = "raw-reality,vless-argo"
+test "$(protocols_from_digits 31)" = "raw-reality,vless-argo"
+test "$(protocols_from_digits 1234)" = "raw-reality,xhttp-reality,vless-argo,vmess-argo"
+test "$(protocols_from_digits 1,3)" = "raw-reality,vless-argo"
+test "$(protocols_from_digits '1 3')" = "raw-reality,vless-argo"
+test "$(protocols_from_digits 11)" = "raw-reality"
+test "$(protocols_from_digits "")" = "raw-reality,xhttp-reality,vless-argo,vmess-argo"
+! protocols_from_digits 15 >/dev/null 2>&1
+! protocols_from_digits abc >/dev/null 2>&1
+! protocols_from_digits 0 >/dev/null 2>&1
+''')
+
     def test_protocols_normalize_orders_and_rejects_bad_input(self):
         self.run_shell(r'''
 test "$(protocols_normalize "vless-argo,raw-reality" | tr '\n' ' ')" = "raw-reality vless-argo "

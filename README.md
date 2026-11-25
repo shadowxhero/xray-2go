@@ -1,4 +1,4 @@
-# Xray-2go v2.1.5
+# Xray-2go v2.1.6
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -30,7 +30,7 @@ PORT=43013 RAW_PORT=43011 XHTTP_PORT=43012 \
 PROTOCOLS=raw-reality,xhttp-reality bash <(curl -fsSL .../xray_2go.sh) --install
 ```
 
-可选值：`raw-reality`、`xhttp-reality`、`vless-argo`、`vmess-argo`。交互式安装会在选择「新安装」后再问一次，直接回车等于四个全装。
+可选值：`raw-reality`、`xhttp-reality`、`vless-argo`、`vmess-argo`。交互安装选「新安装」后会按编号再问一次：`13` 表示只装 RAW-Reality 与 VLESS-Argo，`1234` 或直接回车等于四个全装。
 
 **NAT 服务器必须在服务商面板配置端口映射。** 订阅和两个直连节点使用 TCP。修改机器内的监听端口并不会自动创建公网映射；Argo 内部端口不需要映射。
 

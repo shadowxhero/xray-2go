@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.5 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.6 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.5
+SCRIPT_VERSION=2.1.6
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -148,8 +148,19 @@ protocols_state_set() {
     json=$(printf '%s\n' "$@" | jq -R . | jq -sc .) || return 1
     state_set protocols "$json"
 }
-protocols_normalize() {
-    # 校验并规范化为 ALL_PROTOCOLS 的顺序，去重、忽略未知项。
+# 安装时用编号选协议：1234=全装，13=raw 与 vless-argo，, / 空格可分隔，重复项自动去重。
+protocols_from_digits() {
+    local digits=$1 d seen=" " out=()
+    digits=${digits//[ ,]/}
+    if [ -z "$digits" ]; then printf '%s\n' "${ALL_PROTOCOLS[*]}" | tr ' ' ','; return 0; fi
+    [[ "$digits" =~ ^[1-4]+$ ]] || return 1
+    for ((d=0; d<${#digits}; d++)); do seen="$seen${digits:d:1} "; done
+    for d in 1 2 3 4; do
+        case "$seen" in *" $d "*) out+=("${ALL_PROTOCOLS[$((d-1))]}");; esac
+    done
+    (IFS=,; printf '%s\n' "${out[*]}")
+}
+protocols_normalize() {    # 校验并规范化为 ALL_PROTOCOLS 的顺序，去重、忽略未知项。
     local raw=$1 out=() item p found
     local items=(${raw//,/ })
     for item in "${items[@]}"; do
@@ -1408,6 +1419,24 @@ interactive_tunnel() {
     esac || { red '隧道操作失败，未确认成功。';return 1; }
     green '隧道操作已提交。若重新申请临时域名，同步器会自动更新两个 Argo 节点；Cloudflare 限流时不会立即恢复。'
 }
+# 新安装前询问要装哪些协议，返回逗号分隔列表；直接回车=全部四个。
+ask_install_protocols() {
+    local i input list
+    menu_color 32 '选择要安装的协议（编号可连写，例如 13；直接回车=全部四个）：'
+    i=1
+    for p in "${ALL_PROTOCOLS[@]}"; do
+        menu_color 32 "  $i. $(protocol_label "$p")"
+        i=$((i+1))
+    done
+    while true; do
+        reading '请选择：' input || return 1
+        if list=$(protocols_from_digits "$input"); then
+            printf '%s\n' "$list"
+            return 0
+        fi
+        red '无效输入：只能输入 1-4 的组合，例如 13 或 1234。'
+    done
+}
 interactive_protocols() {
     local choice i p cur next
     while true; do
@@ -1497,7 +1526,7 @@ menu_pause() {
     if [ -t 0 ];then read -n 1 -s -r -p $'\033[1;91m按任意键返回主菜单…\033[0m' || true;printf '\n';fi
 }
 menu() {
-    local choice value network h p mode domain file status proto
+    local choice value network h p mode domain file status
     while true; do
         [ ! -t 1 ] || [ "${TERM:-dumb}" = dumb ] || clear
         render_menu
@@ -1507,8 +1536,7 @@ menu() {
             red '该选项在当前安装状态不可用，请选择屏幕中显示的选项。';menu_pause;continue
         fi
         case "$choice" in
-            1) reading '协议（回车=全部四个；或输入如 raw-reality,vless-argo）：' proto || true
-               if [ -n "${proto:-}" ];then PROTOCOLS="$proto" install_fresh;else install_fresh;fi ;;
+            1) if PROTOCOLS=$(ask_install_protocols);then install_fresh;fi ;;
             2) if [ "$status" = installed ];then
                    if online_update;then green '重新运行 2go 进入更新后的菜单。';return 0;fi
                else upgrade_installation;fi ;;
