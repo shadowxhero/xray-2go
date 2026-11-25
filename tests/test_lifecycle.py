@@ -498,6 +498,68 @@ refresh_sync_service
         self.assertIn('action xray2go-sync start', calls)
         self.assertNotIn('action xray2go-sync stop', calls)
 
+    def test_warp_outbound_uses_wireguard_public_credentials(self):
+        self.run_shell(r'''
+out=$(warp_outbound_json)
+test "$(printf '%s' "$out" | jq -r .protocol)" = "wireguard"
+test "$(printf '%s' "$out" | jq -r .tag)" = "warp"
+test "$(printf '%s' "$out" | jq -r '.settings.peers[0].endpoint')" = "engage.cloudflareclient.com:2408"
+test "$(printf '%s' "$out" | jq -r '.settings.reserved|join(",")')" = "78,135,76"
+test "$(printf '%s' "$out" | jq -r '.settings.address|length')" = "2"
+''')
+
+    def test_warp_service_domains_and_geosite_tags(self):
+        self.run_shell(r'''
+warp_service_domains openai | grep -qx openai.com
+warp_service_domains youtube | grep -qx googlevideo.com
+test "$(warp_geosite_tag google)" = "geosite:google"
+! warp_geosite_tag openai >/dev/null 2>&1
+! warp_service_domains nope >/dev/null 2>&1
+''')
+
+    def test_warp_apply_adds_outbound_and_per_service_rules(self):
+        self.state['warp'] = {'enabled': True, 'routes': ['openai', 'youtube'], 'outbound': 'warp'}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('warp_apply\n')
+        cfg = json.loads((self.home / 'config.json').read_text())
+        tags = [o.get('tag') for o in cfg['outbounds']]
+        self.assertIn('warp', tags)
+        rules = cfg['routing']['rules']
+        self.assertEqual(len(rules), 2)
+        self.assertEqual(rules[0]['outboundTag'], 'warp')
+        self.assertIn('openai.com', rules[0]['domain'])
+        self.assertIn('googlevideo.com', rules[1]['domain'])
+
+    def test_warp_apply_appends_global_rule_last_and_cleans_up(self):
+        self.state['warp'] = {'enabled': True, 'routes': ['netflix'], 'outbound': 'warp', 'global': 'warp'}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('warp_apply\n')
+        cfg = json.loads((self.home / 'config.json').read_text())
+        rules = cfg['routing']['rules']
+        self.assertEqual(rules[-1]['network'], 'tcp,udp')
+        self.assertEqual(rules[-1]['outboundTag'], 'warp')
+        # 关掉之后：warp 出站与所有分流规则都应被清掉
+        self.state['warp'] = {'enabled': False, 'routes': [], 'global': None}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('warp_apply\n')
+        cfg = json.loads((self.home / 'config.json').read_text())
+        self.assertNotIn('warp', [o.get('tag') for o in cfg['outbounds']])
+        self.assertNotIn('routing', cfg)
+
+    def test_warp_proxy_outbound_is_added_and_removable(self):
+        proxy = {'tag': 'proxy-1', 'protocol': 'socks',
+                 'settings': {'servers': [{'address': '1.2.3.4', 'port': 1080}]}}
+        self.state['warp'] = {'enabled': False, 'routes': [], 'proxies': [proxy]}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('warp_apply\n')
+        cfg = json.loads((self.home / 'config.json').read_text())
+        self.assertIn('proxy-1', [o.get('tag') for o in cfg['outbounds']])
+        self.state['warp'] = {'enabled': False, 'routes': [], 'proxies': []}
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell('warp_apply\n')
+        cfg = json.loads((self.home / 'config.json').read_text())
+        self.assertNotIn('proxy-1', [o.get('tag') for o in cfg['outbounds']])
+
     def test_sync_skips_file_generation_when_subscription_disabled(self):
         self.state['subscription_enabled'] = False
         (self.home / 'state.json').write_text(json.dumps(self.state))

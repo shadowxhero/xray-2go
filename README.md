@@ -1,4 +1,4 @@
-# Xray-2go v2.1.10
+# Xray-2go v2.2.0
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -166,6 +166,18 @@ xn--b6gac.eu.org
 - 最后一条协议不允许关闭（订阅会变成空的）；
 - 新增 Reality 协议时，若配置里已经没有可复用的私钥，会现场生成一对新的 x25519 密钥。
 
+## WARP 分流（v2.2.0）
+
+菜单 **19. WARP 分流管理**：把指定服务的流量交给 WARP 或自定义 Socks5/HTTP 出站，其余仍走服务器本机直连。
+
+- WARP 出站使用公共凭据（与 sing-box 脚本同一套），无需注册、无需 `wgcf`；
+- 内置 9 个服务：OpenAI/ChatGPT、Claude、Gemini、Google、TikTok、Twitter/X、YouTube、Netflix、Telegram，规则用脚本内置的域名列表；
+- 若运行目录下有 `geosite.dat`，可在菜单里开启 geosite 叠加（google/youtube/netflix/telegram/twitter/tiktok），两类规则同时生效；没有该文件时只走域名列表，不会因未知分类导致 Xray 启动失败；
+- 可添加多个 Socks5/HTTP 出站，分流目标与全局代理都能从中任选；
+- 全局代理追加一条 `network: tcp,udp` 的兜底规则；「恢复直连」清空全部分流规则并移除 WARP/代理出站；
+- 每次变更都经 `xray -test` 校验，失败自动回滚到原配置。
+
+状态保存在 `state.json` 的 `warp` 字段：`enabled` / `routes` / `outbound` / `geosite` / `global` / `proxies`。
 ## 卸载
 
 卸载只停止和移除本脚本的专属服务，确认进程退出后再归档配置。不会卸载共享 Nginx 软件包，不调用全局 `pkill nginx`，不影响 ArgoX。配置、密钥和备份移到 root 目录，便于恢复；不直接销毁用户凭据。

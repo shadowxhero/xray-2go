@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.10 — based on eooce/xray-2go (MIT).
-# 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
+# Xray-2go v2.2.0 — based on eooce/xray-2go (MIT).
+# 专属 Nginx、原生服务监督、原子订阅、隧道存活探测、WARP 分流与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.10
+SCRIPT_VERSION=2.2.0
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -402,6 +402,104 @@ apply_protocols_unlocked() {
     fi
     refresh_sync_service
     green "已启用协议：${new_joined}"
+}
+# ==================== WARP 分流 ====================
+# 与 sing-box 脚本保持一致：wireguard 出站使用公共 WARP 凭据，按服务名分组分流。
+WARP_SERVICES=(openai claude gemini google tiktok twitter youtube netflix telegram)
+WARP_WG_SECRET="YFYOAdbw1bKTHlNNi+aEjBM3BO7unuFC5rOkMRAz9XY="
+WARP_WG_PUBKEY="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+WARP_WG_PEER="engage.cloudflareclient.com:2408"
+WARP_WG_ADDRS='["172.16.0.2/32","2606:4700:110:8dfe:d141:69bb:6b80:925/128"]'
+WARP_WG_RESERVED='[78,135,76]'
+
+warp_service_label() {
+    case "$1" in
+        openai) printf 'OpenAI / ChatGPT' ;; claude) printf 'Claude' ;;
+        gemini) printf 'Gemini' ;; google) printf 'Google' ;;
+        tiktok) printf 'TikTok' ;; twitter) printf 'Twitter / X' ;;
+        youtube) printf 'YouTube' ;; netflix) printf 'Netflix' ;;
+        telegram) printf 'Telegram' ;; *) return 1 ;;
+    esac
+}
+warp_service_domains() {
+    case "$1" in
+        openai) printf '%s\n' openai.com chatgpt.com oaistatic.com oaiusercontent.com ;;
+        claude) printf '%s\n' claude.ai anthropic.com ;;
+        gemini) printf '%s\n' gemini.google.com bard.google.com generativelanguage.googleapis.com aistudio.google.com ;;
+        google) printf '%s\n' google.com gstatic.com googleapis.com googleusercontent.com withgoogle.com ;;
+        tiktok) printf '%s\n' tiktok.com tiktokcdn.com tiktokv.com ibytedtos.com ;;
+        twitter) printf '%s\n' x.com twitter.com twimg.com t.co ;;
+        youtube) printf '%s\n' youtube.com youtu.be googlevideo.com ytimg.com ggpht.com ;;
+        netflix) printf '%s\n' netflix.com nflxvideo.net nflximg.net nflxso.net nflxext.com ;;
+        telegram) printf '%s\n' telegram.org t.me telegram.me telesco.pe ;;
+        *) return 1 ;;
+    esac
+}
+# 只对 geosite.dat 里确定存在的分类返回标签，未知分类会让 Xray 启动失败。
+warp_geosite_tag() {
+    case "$1" in
+        google) printf 'geosite:google' ;; youtube) printf 'geosite:youtube' ;;
+        netflix) printf 'geosite:netflix' ;; telegram) printf 'geosite:telegram' ;;
+        twitter) printf 'geosite:twitter' ;; tiktok) printf 'geosite:tiktok' ;;
+        *) return 1 ;;
+    esac
+}
+warp_outbound_json() {
+    jq -cn --arg sk "$WARP_WG_SECRET" --arg pk "$WARP_WG_PUBKEY" --arg ep "$WARP_WG_PEER" \
+        --argjson addr "$WARP_WG_ADDRS" --argjson res "$WARP_WG_RESERVED" \
+        '{tag:"warp",protocol:"wireguard",settings:{secretKey:$sk,address:$addr,peers:[{publicKey:$pk,endpoint:$ep}],mtu:1280,reserved:$res}}'
+}
+warp_enabled() { jq -r '.warp.enabled // false' "$state_file" 2>/dev/null; }
+warp_target()  { jq -r '.warp.outbound // "warp"' "$state_file" 2>/dev/null; }
+warp_on_geosite() { jq -r '.warp.geosite // false' "$state_file" 2>/dev/null; }
+warp_routes()  { jq -r '.warp.routes // [] | .[]' "$state_file" 2>/dev/null; }
+warp_global()  { jq -r '.warp.global // empty' "$state_file" 2>/dev/null; }
+warp_set() {
+    local t
+    t=$(mktemp "$work_dir/.state.XXXXXX") || return 1
+    jq --arg k "$1" --argjson v "$2" '.warp = ((.warp // {}) + {($k): $v})' "$state_file" > "$t" \
+        && chmod 600 "$t" && mv "$t" "$state_file" || { rm -f "$t"; return 1; }
+}
+warp_set_routes() {
+    local json
+    if [ $# -eq 0 ]; then json="[]"; else json=$(printf '%s\n' "$@" | jq -R . | jq -sc .); fi
+    warp_set routes "$json"
+}
+# 按 state 重建 outbounds 与 routing；未启用时把相关出站和规则全部清掉。
+warp_apply() { with_lock warp_apply_unlocked; }
+warp_apply_unlocked() {
+    local enabled target geosite global routes proxies candidate svc domains
+    enabled=$(warp_enabled); target=$(warp_target); geosite=$(warp_on_geosite)
+    global=$(warp_global); routes=$(warp_routes); proxies=$(jq -c '.warp.proxies // []' "$state_file" 2>/dev/null)
+    [ -n "$proxies" ] || proxies='[]'
+    candidate=$(mktemp "$work_dir/.config.XXXXXX") || return 1
+    jq 'del(.outbounds[]? | select((.tag // "") == "warp" or ((.tag // "") | startswith("proxy-"))))
+        | del(.routing.rules[]? | select((.outboundTag // "") == "warp" or ((.outboundTag // "") | startswith("proxy-"))))
+        | (if ((.routing.rules // []) | length) == 0 then del(.routing) else . end)' \
+        "$config_dir" > "$candidate" || { rm -f "$candidate"; return 1; }
+    if [ "$enabled" = true ]; then
+        jq --argjson w "$(warp_outbound_json)" '.outbounds += [$w]' "$candidate" > "$candidate.tmp" \
+            && mv "$candidate.tmp" "$candidate" || { rm -f "$candidate" "$candidate.tmp"; return 1; }
+    fi
+    if [ "$proxies" != '[]' ]; then
+        jq --argjson px "$proxies" '.outbounds += $px' "$candidate" > "$candidate.tmp" \
+            && mv "$candidate.tmp" "$candidate" || { rm -f "$candidate" "$candidate.tmp"; return 1; }
+    fi
+    for svc in $routes; do
+        domains=$(warp_service_domains "$svc" | jq -R . | jq -sc .) || continue
+        if [ "$geosite" = true ] && [ -f "$work_dir/geosite.dat" ] && gtag=$(warp_geosite_tag "$svc"); then
+            domains=$(printf '%s' "$domains" | jq --arg g "$gtag" '. + [$g]')
+        fi
+        jq --argjson d "$domains" --arg t "$target" \
+            '.routing = ((.routing // {}) + {"rules": ((.routing.rules // []) + [{"type":"field","domain":$d,"outboundTag":$t}])})' \
+            "$candidate" > "$candidate.tmp" && mv "$candidate.tmp" "$candidate" || { rm -f "$candidate" "$candidate.tmp"; return 1; }
+    done
+    if [ -n "$global" ]; then
+        jq --arg t "$global" \
+            '.routing = ((.routing // {}) + {"rules": ((.routing.rules // []) + [{"type":"field","network":"tcp,udp","outboundTag":$t}])})' \
+            "$candidate" > "$candidate.tmp" && mv "$candidate.tmp" "$candidate" || { rm -f "$candidate" "$candidate.tmp"; return 1; }
+    fi
+    apply_xray_config "$candidate"
 }
 set_direct_port() { with_lock set_direct_port_unlocked "$@"; }
 set_direct_port_unlocked() {
@@ -1268,7 +1366,7 @@ menu_option_allowed() {
     local status=$1 choice=$2
     case "$choice" in 0|h|H) return 0;;esac
     case "$status:$choice" in
-        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16|installed:17|installed:18) return 0;;
+        absent:1|legacy:2|installed:2|installed:3|installed:4|installed:5|installed:6|installed:7|installed:8|installed:9|installed:10|installed:11|installed:12|installed:13|installed:14|installed:15|installed:16|installed:17|installed:18|installed:19) return 0;;
         partial:2) [ -x "$work_dir/xray" ] && [ -s "$config_dir" ] && [ -s "$client_dir" ];return $?;;
         *) return 1;;
     esac
@@ -1296,6 +1394,7 @@ render_menu() {
             menu_separator
             menu_color 32 '10. 服务启停'
             menu_color 32 '11. 隧道管理'
+            menu_color 32 '19. WARP 分流管理'
             menu_color 32 '12. 修改 UUID'
             menu_color 32 '13. 修改 Reality SNI'
             menu_color 32 '14. 修改 Argo 优选地址/端口'
@@ -1558,6 +1657,141 @@ interactive_address() {
 menu_pause() {
     if [ -t 0 ];then read -n 1 -s -r -p $'\033[1;91m按任意键返回主菜单…\033[0m' || true;printf '\n';fi
 }
+interactive_warp() {
+    local choice global
+    while true; do
+        menu_color 32 '=== WARP 分流管理 ==='
+        if [ "$(warp_enabled)" = true ]; then menu_color 32 'WARP 出站：已启用'
+        else menu_color 33 'WARP 出站：已关闭'; fi
+        menu_color 33 "分流目标：$(warp_target)"
+        menu_color 33 "已分流：$(warp_routes | tr '\n' ' ' | sed 's/ $//;s/^$/无/')"
+        global=$(warp_global); menu_color 33 "全局出站：${global:-未启用}"
+        if [ "$(warp_on_geosite)" = true ] && [ -f "$work_dir/geosite.dat" ]; then menu_color 32 'geosite 叠加：开'
+        else menu_color 33 'geosite 叠加：关（域名列表仍生效）'; fi
+        menu_color 32 '1. 开关 WARP 出站'
+        menu_color 32 '2. 设置/取消分流服务'
+        menu_color 32 '3. 添加 Socks5/HTTP 出站'
+        menu_color 32 '4. 删除 Socks5/HTTP 出站'
+        menu_color 32 '5. 选择分流目标'
+        menu_color 32 '6. 设置全局代理'
+        menu_color 32 '7. 恢复直连（清空所有分流）'
+        menu_color 32 '8. geosite 叠加开关'
+        menu_color 35 '0. 返回'
+        reading '选择：' choice || return 1
+        case "$choice" in
+            0) return 0 ;;
+            1)
+                if [ "$(warp_enabled)" = true ]; then warp_set enabled false && green 'WARP 出站已关闭。'
+                else warp_set enabled true && green 'WARP 出站已启用（公共凭据）。'; fi
+                warp_apply || { red '应用失败，配置已回滚。'; return 1; } ;;
+            2) interactive_warp_services || true ;;
+            3) interactive_warp_add_proxy || true ;;
+            4) interactive_warp_del_proxy || true ;;
+            5) interactive_warp_target || true ;;
+            6) interactive_warp_global || true ;;
+            7) warp_set_routes; warp_set global 'null'; warp_apply && green '已恢复直连。' ;;
+            8)
+                if [ ! -f "$work_dir/geosite.dat" ]; then red '未找到 geosite.dat，无法叠加分类规则。'
+                else
+                    if [ "$(warp_on_geosite)" = true ]; then warp_set geosite false && green '已关闭 geosite 叠加。'
+                    else warp_set geosite true && green '已开启 geosite 叠加。'; fi
+                    warp_apply || red '应用失败，配置已回滚。'
+                fi ;;
+            *) red '无效选项' ;;
+        esac
+        menu_pause
+    done
+}
+interactive_warp_services() {
+    local i svc choice cur
+    while true; do
+        menu_color 32 '=== 分流服务（选择编号切换）==='
+        cur=$(warp_routes)
+        i=1
+        for svc in "${WARP_SERVICES[@]}"; do
+            if printf '%s\n' "$cur" | grep -qx "$svc"; then menu_color 32 "  $i. [已分流] $(warp_service_label "$svc")"
+            else menu_color 33 "  $i. [直连]   $(warp_service_label "$svc")"; fi
+            i=$((i+1))
+        done
+        menu_color 35 '0. 返回'
+        reading '选择：' choice || return 1
+        case "$choice" in
+            0) return 0 ;;
+            [1-9])
+                svc="${WARP_SERVICES[$((choice-1))]}"
+                if printf '%s\n' "$cur" | grep -qx "$svc"; then
+                    warp_set_routes $(printf '%s\n' "$cur" | grep -vx "$svc")
+                    green "已取消分流：$(warp_service_label "$svc")"
+                else
+                    warp_set_routes $cur "$svc"
+                    green "已分流：$(warp_service_label "$svc")"
+                fi
+                warp_apply || { red '应用失败，配置已回滚。'; return 1; } ;;
+            *) red '无效选项' ;;
+        esac
+        menu_pause
+    done
+}
+warp_proxy_tags() { jq -r '.warp.proxies // [] | .[].tag' "$state_file" 2>/dev/null; }
+interactive_warp_add_proxy() {
+    local choice type addr port user pass tag json t
+    menu_color 32 '=== 添加 Socks5/HTTP 出站 ==='
+    reading '类型（1=Socks5, 2=HTTP）：' choice || return 1
+    case "$choice" in 1) type=socks ;; 2) type=http ;; *) red '无效类型' ; return 1 ;; esac
+    reading '地址（IP 或域名）：' addr || return 1
+    valid_host "$addr" || { red '地址格式错误'; return 1; }
+    reading '端口：' port || return 1
+    valid_port "$port" || { red '端口错误'; return 1; }
+    reading '用户名（留空表示无认证）：' user || return 1
+    reading '密码：' pass || return 1
+    tag="proxy-$(date +%s)"
+    json=$(jq -cn --arg t "$tag" --arg ty "$type" --arg a "$addr" --argjson p "$port" --arg u "$user" --arg pw "$pass" \
+        '{tag:$t,protocol:$ty,settings:{servers:[({address:$a,port:$p} + (if $u != "" then {users:[{user:$u,pass:$pw}]} else {} end))]}}') || return 1
+    t=$(mktemp "$work_dir/.state.XXXXXX") || return 1
+    jq --argjson px "$json" '.warp = ((.warp // {}) + {"proxies": ((.warp.proxies // []) + [$px])})' "$state_file" > "$t" \
+        && chmod 600 "$t" && mv "$t" "$state_file" || { rm -f "$t"; return 1; }
+    warp_apply && green "已添加出站：$tag" || red '应用失败，配置已回滚。'
+}
+interactive_warp_del_proxy() {
+    local tags i tag choice tmp
+    tags=$(warp_proxy_tags)
+    [ -n "$tags" ] || { yellow '没有自定义出站。' ; return 0; }
+    i=1
+    for tag in $tags; do menu_color 32 "  $i. $tag"; i=$((i+1)); done
+    reading '要删除的编号（0 返回）：' choice || return 1
+    [ "$choice" = 0 ] && return 0
+    [[ "$choice" =~ ^[0-9]+$ ]] || { red '无效编号'; return 1; }
+    tag=$(printf '%s\n' "$tags" | sed -n "${choice}p")
+    [ -n "$tag" ] || { red '编号超出范围'; return 1; }
+    tmp=$(mktemp "$work_dir/.state.XXXXXX") || return 1
+    jq --arg t "$tag" '.warp = ((.warp // {}) + {"proxies": [(.warp.proxies // [])[] | select(.tag != $t)]})' "$state_file" > "$tmp" \
+        && chmod 600 "$tmp" && mv "$tmp" "$state_file" || { rm -f "$tmp"; return 1; }
+    warp_apply && green "已删除出站：$tag" || red '应用失败，配置已回滚。'
+}
+warp_available_outbounds() {
+    [ "$(warp_enabled)" = true ] && printf 'warp\n'
+    warp_proxy_tags 2>/dev/null
+}
+warp_pick_outbound() {
+    local prompt=$1 opts=() tag i choice
+    while IFS= read -r tag; do [ -n "$tag" ] && opts+=("$tag"); done <<< "$(warp_available_outbounds)"
+    [ ${#opts[@]} -gt 0 ] || { red '没有可用出站：请先开启 WARP 或添加代理。'; return 1; }
+    i=1
+    for tag in "${opts[@]}"; do menu_color 32 "  $i. $tag"; i=$((i+1)); done
+    reading "$prompt" choice || return 1
+    [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#opts[@]} ] || { red '无效编号'; return 1; }
+    printf '%s\n' "${opts[$((choice-1))]}"
+}
+interactive_warp_target() {
+    local tag
+    tag=$(warp_pick_outbound '选择分流目标：') || return 1
+    warp_set outbound "\"$tag\"" && warp_apply && green "分流目标已切换为：$tag" || red '应用失败，配置已回滚。'
+}
+interactive_warp_global() {
+    local tag
+    tag=$(warp_pick_outbound '选择全局代理出站：') || return 1
+    warp_set global "\"$tag\"" && warp_apply && green "全局出站已设为：$tag" || red '应用失败，配置已回滚。'
+}
 menu() {
     local choice value network h p mode domain file status
     while true; do
@@ -1582,6 +1816,7 @@ menu() {
             9) interactive_subscription ;;
             10) interactive_services ;;
             11) interactive_tunnel ;;
+            19) interactive_warp ;;
             12) reading '新 UUID（留空随机生成）：' value && set_uuid "${value:-$(random_uuid)}" && { green 'UUID 已更新，请更新客户端订阅。';show_nodes; } ;;
             13) interactive_sni ;;
             14) interactive_cdn ;;
