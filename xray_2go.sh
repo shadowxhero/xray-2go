@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.2 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.3 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.2
+SCRIPT_VERSION=2.1.3
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -271,16 +271,20 @@ EOF
 }
 
 write_openrc_services() {
-    local name cmd args delay
+    local name cmd args delay oom_adj
     mkdir -p "$init_dir"
     for name in "${SERVICES[@]}"; do
-        delay=5
+        delay=5; oom_adj=0
         case "$name" in
-            xray2go-core) cmd="$work_dir/xray"; args="run -c $config_dir" ;;
-            xray2go-tunnel) cmd="$work_dir/tunnel-worker.sh"; args=''; delay=60 ;;
+            xray2go-core) cmd="$work_dir/xray"; args="run -c $config_dir"; oom_adj=-500 ;;
+            xray2go-tunnel) cmd="$work_dir/tunnel-worker.sh"; args=''; delay=60; oom_adj=-500 ;;
             xray2go-sub) cmd=$(command -v nginx); args="-c $work_dir/nginx.conf -g 'daemon off;'" ;;
-            xray2go-sync) cmd="$work_dir/sync-loop.sh"; args='' ;;
+            xray2go-sync) cmd="$work_dir/sync-loop.sh"; args=''; oom_adj=500 ;;
         esac
+        # 小内存机器上 OOM killer 按 oom_badness 选目标：xray/cloudflared 占用最大，
+        # 不调整就总是它们先被杀；cloudflared 一旦重启会重新申请临时隧道、换域名，
+        # 客户端随即失效。这里把两条关键链路设为难以被杀，让同步器（5 秒拉起、无副作用）
+        # 承担被杀的代价。
         cat > "$init_dir/$name" <<EOF
 #!/sbin/openrc-run
 # Managed by shadowxhero/xray-2go
@@ -294,22 +298,27 @@ respawn_period=0
 pidfile="$run_dir/$name.pid"
 export GOMEMLIMIT=${XRAY_GOMEMLIMIT:-32MiB}
 export GOGC=${XRAY_GOGC:-20}
+start_pre() {
+    [ -w /proc/self/oom_score_adj ] && echo $oom_adj > /proc/self/oom_score_adj
+    return 0
+}
 depend() { need net; }
 EOF
         chmod 755 "$init_dir/$name"
     done
 }
 write_systemd_services() {
-    local name exec delay
+    local name exec delay oom_adj
     mkdir -p "$systemd_dir"
     for name in "${SERVICES[@]}"; do
-        delay=5
+        delay=5; oom_adj=0
         case "$name" in
-            xray2go-core) exec="$work_dir/xray run -c $config_dir" ;;
-            xray2go-tunnel) exec="$work_dir/tunnel-worker.sh"; delay=60 ;;
+            xray2go-core) exec="$work_dir/xray run -c $config_dir"; oom_adj=-500 ;;
+            xray2go-tunnel) exec="$work_dir/tunnel-worker.sh"; delay=60; oom_adj=-500 ;;
             xray2go-sub) exec="$(command -v nginx) -c $work_dir/nginx.conf -g 'daemon off;'" ;;
-            xray2go-sync) exec="$work_dir/sync-loop.sh" ;;
+            xray2go-sync) exec="$work_dir/sync-loop.sh"; oom_adj=500 ;;
         esac
+        # 同 openrc：保护 xray/cloudflared 不被 OOM 优先选中，让同步器承担重启代价。
         cat > "$systemd_dir/$name.service" <<EOF
 # Managed by shadowxhero/xray-2go
 [Unit]
@@ -323,6 +332,7 @@ ExecStart=$exec
 Restart=always
 RestartSec=$delay
 KillMode=control-group
+OOMScoreAdjust=$oom_adj
 Environment="GOMEMLIMIT=${XRAY_GOMEMLIMIT:-32MiB}" "GOGC=${XRAY_GOGC:-20}"
 StandardOutput=null
 StandardError=null

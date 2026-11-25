@@ -1,4 +1,4 @@
-# Xray-2go v2.1.2
+# Xray-2go v2.1.3
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -53,6 +53,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 
 新安装默认开机自启。systemd 使用原生重启策略；Alpine/OpenRC 使用 `supervise-daemon`，异常退出或被 OOM 杀死后重启。Xray/Nginx/同步器重启延迟 5 秒，隧道 60 秒，避免反复申请临时域名触发 429。
 
+**OOM 不再优先杀关键进程（v2.1.3）。** 内核的 OOM killer 按 `oom_badness` 选目标，占用最大的 xray/cloudflared 总是先被选中；cloudflared 一重启就重新申请临时隧道、换域名，客户端订阅随即失效。现在 `xray2go-core` 与 `xray2go-tunnel` 的 `oom_score_adj` 为 **-500**，`xray2go-sync` 为 **500**，`xray2go-sub` 保持 **0**：内存告急时优先牺牲同步器（5 秒拉起、无副作用），避免换域名。OpenRC 用 `start_pre` 写入 `/proc/self/oom_score_adj`（函数始终 `return 0`，不可写时不影响启动），systemd 用 `OOMScoreAdjust=`。
+
 **临时隧道被 Cloudflare 回收时进程不会退出**：cloudflared 收到 `Unauthorized: Tunnel not found` 后一直重连，`supervise-daemon` 不触发重启，`argo.log` 里也不会再出现新域名，订阅就会长期指向一个 DNS 已消失的域名。v2.1.0 起同步器每 6 轮（约 60 秒）调用一次 `2go --health` 做存活探测：
 
 - 判据是 `argo.log`：本次进程出现过 `Tunnel not found` 判死，没出现 `Registered tunnel connection` 也判死；
@@ -101,6 +103,8 @@ Xray 设置 `GOMEMLIMIT=32MiB`、`GOGC=20`；cloudflared 设置 `GOMEMLIMIT=20Mi
 **v2.1.1 把探测判据从 HTTP 请求改成读 `argo.log`。** 128MB 内存的机器上（`memory.max` 128MiB），`--health` 每轮 fork 一个 `curl` 的瞬时峰值就会把 cgroup 顶到上限触发 OOM kill：实测 `memory.events` 的 `oom_kill` 累计 5 次、`memory.peak` 132.7MB 已超过上限，表现为 xray 与 cloudflared 被反复杀掉、客户端整机连不上。日志判据不联网，探测频率也降为约 60 秒一次。
 
 **v2.1.2 把两个 Go 程序的内存软目标调低**（Xray 48MiB/GOGC30 → 32MiB/GOGC20，cloudflared 30MiB/GOGC25 → 20MiB/GOGC15），并支持用环境变量覆盖。同一台 128MiB 机器在 v2.1.1 之后 13 小时里仍被 OOM 杀了 2 次（`oom_kill` 5→7，`argo` 被杀后重申请临时隧道、域名改变、客户端全部失效），所以调低软目标属于缓解而不是根治。
+
+**v2.1.3 用 `oom_score_adj` 把 OOM 的刀口挪到同步器上**。实测那台机的 `memory.current` 里 `anon` 只有 29MB，其余 77MB 是 xray(35MB)+cloudflared(40MB) 二进制的页缓存；OOM 并不挑“吃内存最多的坏进程”，而是按占用排序挑，于是两条关键链路总是先死。调整优先级后内存告急时先杀同步器（5 秒内被 `supervise-daemon` 拉起，不改任何状态），隧道域名不再变化，客户端的订阅也就不再作废。
 
 **升级后需要重建服务**（`2go --repair` 或菜单 17）才会写入新的 `sync-loop.sh`；只执行 `--update` 仅保存脚本，已经运行的同步循环内容不会改变。
 

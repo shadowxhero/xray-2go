@@ -433,6 +433,17 @@ test ! -s "$CASE/probes"
         self.assertIn('ARGO_GOMEMLIMIT:-20MiB', SCRIPT.read_text())
         self.assertIn('ARGO_GOGC:-15', SCRIPT.read_text())
 
+    def test_oom_score_adj_protects_core_and_tunnel(self):
+        self.run_shell('write_runtime_helpers\nwrite_openrc_services\nwrite_systemd_services\n')
+        for name, adj in (('xray2go-core', '-500'), ('xray2go-tunnel', '-500'),
+                          ('xray2go-sync', '500'), ('xray2go-sub', '0')):
+            svc = (self.d / 'init.d' / name).read_text()
+            self.assertIn(f'echo {adj} > /proc/self/oom_score_adj', svc, name)
+            # start_pre 必须始终返回 0，否则 oom_score_adj 不可写时服务会启动失败。
+            self.assertIn('return 0', svc.split('start_pre()')[1], name)
+            unit = (self.d / 'systemd' / (name + '.service')).read_text()
+            self.assertIn(f'OOMScoreAdjust={adj}', unit, name)
+
     def test_tunnel_probe_uses_cloudflared_log_and_never_touches_network(self):
         log = self.home / 'argo.log'
         log.write_text('INF Registered tunnel connection connIndex=0\n')
