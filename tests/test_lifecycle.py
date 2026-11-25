@@ -450,6 +450,54 @@ cleanup_failed_install
         self.assertEqual(s['subscription_path'], 'KeepOldPath')
         self.assertEqual(before, (self.home / 'config.json').read_bytes())
 
+    def test_sync_service_stops_when_no_argo_and_subscription_disabled(self):
+        self.state['protocols'] = ['xhttp-reality']
+        self.state['subscription_enabled'] = False
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell(r'''
+calls="$CASE/calls"
+service_enable() { printf 'enable %s\n' "$1" >> "$calls"; }
+service_disable() { printf 'disable %s\n' "$1" >> "$calls"; }
+service_action() { printf 'action %s %s\n' "$1" "$2" >> "$calls"; }
+refresh_sync_service
+''')
+        calls = (self.d / 'calls').read_text()
+        self.assertIn('action xray2go-sync stop', calls)
+        self.assertIn('disable xray2go-sync', calls)
+        self.assertNotIn('action xray2go-sync start', calls)
+
+    def test_sync_service_keeps_running_when_argo_protocol_present(self):
+        # 关订阅但还有 Argo 协议：隧道自愈还得靠它，不能停。
+        self.state['protocols'] = ['xhttp-reality', 'vless-argo']
+        self.state['subscription_enabled'] = False
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell(r'''
+calls="$CASE/calls"
+service_enable() { printf 'enable %s\n' "$1" >> "$calls"; }
+service_disable() { printf 'disable %s\n' "$1" >> "$calls"; }
+service_action() { printf 'action %s %s\n' "$1" "$2" >> "$calls"; }
+refresh_sync_service
+''')
+        calls = (self.d / 'calls').read_text()
+        self.assertIn('enable xray2go-sync', calls)
+        self.assertIn('action xray2go-sync start', calls)
+        self.assertNotIn('action xray2go-sync stop', calls)
+
+    def test_sync_service_keeps_running_when_subscription_enabled(self):
+        self.state['protocols'] = ['xhttp-reality']
+        self.state['subscription_enabled'] = True
+        (self.home / 'state.json').write_text(json.dumps(self.state))
+        self.run_shell(r'''
+calls="$CASE/calls"
+service_enable() { printf 'enable %s\n' "$1" >> "$calls"; }
+service_disable() { printf 'disable %s\n' "$1" >> "$calls"; }
+service_action() { printf 'action %s %s\n' "$1" "$2" >> "$calls"; }
+refresh_sync_service
+''')
+        calls = (self.d / 'calls').read_text()
+        self.assertIn('action xray2go-sync start', calls)
+        self.assertNotIn('action xray2go-sync stop', calls)
+
     def test_sync_skips_file_generation_when_subscription_disabled(self):
         self.state['subscription_enabled'] = False
         (self.home / 'state.json').write_text(json.dumps(self.state))

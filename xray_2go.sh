@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.9 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.10 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.9
+SCRIPT_VERSION=2.1.10
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -175,6 +175,12 @@ protocols_normalize() {    # 校验并规范化为 ALL_PROTOCOLS 的顺序，去
     printf '%s\n' "${out[@]}"
 }
 any_argo_protocol() { protocol_enabled vless-argo || protocol_enabled vmess-argo; }
+# 同步器是否还有活可干：订阅开着要维护订阅文件，有 Argo 协议要保持域名同步与健康检查。
+# 两者都不满足时它纯空转，直接停掉并取消自启（重新满足条件时再拉起）。
+sync_service_needed() {
+    any_argo_protocol && return 0
+    jq -e .subscription_enabled "$state_file" >/dev/null 2>&1
+}
 
 # 始终由真实入站和持久状态重新导出，不对 URI 做固定行号/IPv4 正则替换。
 generate_subscription() { with_lock generate_subscription_unlocked; }
@@ -394,6 +400,7 @@ apply_protocols_unlocked() {
         service_action xray2go-tunnel stop || true
         service_disable xray2go-tunnel || true
     fi
+    refresh_sync_service
     green "已启用协议：${new_joined}"
 }
 set_direct_port() { with_lock set_direct_port_unlocked "$@"; }
@@ -628,6 +635,17 @@ set_subscription_enabled() {
     else
         service_action xray2go-sub stop || return 1
         service_disable xray2go-sub; state_set subscription_enabled false
+    fi
+    refresh_sync_service
+}
+# 订阅开关或协议变化后，按 sync_service_needed 重新对齐同步器的运行与自启。
+refresh_sync_service() {
+    if sync_service_needed; then
+        service_enable xray2go-sync >/dev/null 2>&1 || true
+        service_action xray2go-sync start >/dev/null 2>&1 || true
+    else
+        service_action xray2go-sync stop >/dev/null 2>&1 || true
+        service_disable xray2go-sync >/dev/null 2>&1 || true
     fi
 }
 
@@ -870,6 +888,7 @@ configure_services() {
             if [ -f "$UPGRADE_BACKUP/enabled-$s" ]; then service_enable "$s"; else service_disable "$s"; fi
         elif [ "$s" = xray2go-sub ] && ! jq -e .subscription_enabled "$state_file" >/dev/null; then service_disable "$s"
         elif [ "$s" = xray2go-tunnel ] && ! any_argo_protocol; then service_disable "$s"
+        elif [ "$s" = xray2go-sync ] && ! sync_service_needed; then service_disable "$s"
         else service_enable "$s" || return 1; fi
     done
 }
@@ -878,6 +897,7 @@ start_services() {
     for s in "${SERVICES[@]}"; do
         if [ "$s" = xray2go-sub ] && ! jq -e .subscription_enabled "$state_file" >/dev/null; then continue; fi
         if [ "$s" = xray2go-tunnel ] && ! any_argo_protocol; then continue; fi
+        if [ "$s" = xray2go-sync ] && ! sync_service_needed; then continue; fi
         action=start
         if [ -n "${UPGRADE_BACKUP:-}" ]; then
             if [ -f "$UPGRADE_BACKUP/old-openrc-$s" ] || [ -f "$UPGRADE_BACKUP/old-systemd-$s.service" ]; then

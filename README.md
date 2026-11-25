@@ -1,4 +1,4 @@
-# Xray-2go v2.1.9
+# Xray-2go v2.1.10
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -71,7 +71,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shadowxhero/xray-2go/main/xr
 - 连续 3 次探测失败才重启 `xray2go-tunnel` 重新申请域名，重启同时写入 `last-renew`，与手动 `--restart` 共用 60 秒冷却；
 - 只看日志的代价是：cloudflared 静默挂起（既不报错也不退出）时判不出来，需要手动 `2go --restart`。
 
-**主动停止的隧道不会被拉起。** 关闭订阅只停止 Nginx 订阅服务并取消其自启，同步器仍会运行（它同时负责隧道域名同步和健康检查），但关闭期间不再生成订阅文件，重新开启时会立刻补生成一次；`xray2go-tunnel` 被人为 stop 时健康探测会直接跳过，只有"服务在运行但域名已经不通"才会重启。Nginx 使用低负载单进程前台模式，避免主进程被杀后留下 worker 占端口。
+**主动停止的隧道不会被拉起。** 关闭订阅只停止 Nginx 订阅服务并取消其自启，关闭期间不再生成订阅文件；同步器改为按需运行——订阅开启、或仍有任一 Argo 协议时保持运行（负责隧道域名与健康检查），两者都不满足时自动停止并取消自启，重新满足条件时会自己回来；`xray2go-tunnel` 被人为 stop 时健康探测会直接跳过，只有"服务在运行但域名已经不通"才会重启。Nginx 使用低负载单进程前台模式，避免主进程被杀后留下 worker 占端口。
 
 这台机器的同步器仍然只做上面这些事，不会重启 Xray 或 Nginx。
 
