@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Xray-2go v2.1.3 — based on eooce/xray-2go (MIT).
+# Xray-2go v2.1.4 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.1.3
+SCRIPT_VERSION=2.1.4
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -93,9 +93,13 @@ derive_public_key() {
     [ -n "$pub" ] && printf '%s\n' "$pub"
 }
 validate_xray_config() {
-    local check result=0
-    check=$(mktemp "$work_dir/.validate.XXXXXX.json") || return 1
-    chmod 600 "$check"; cp "$1" "$check" || { rm -f "$check"; return 1; }
+    local staged check result=0
+    # Alpine 默认的 busybox mktemp 只接受以 XXXXXX 结尾的模板（没有 GNU 的 --suffix），
+    # 写成 ".validate.XXXXXX.json" 会直接 EINVAL。后缀只能在模板之后自己拼。
+    staged=$(mktemp "$work_dir/.validate.XXXXXX") || return 1
+    check="$staged.json"
+    cp "$1" "$check" || { rm -f "$staged" "$check"; return 1; }
+    rm -f "$staged"; chmod 600 "$check"
     "$work_dir/xray" run -test -format json -c "$check" >/dev/null 2>&1 || result=$?
     rm -f "$check"; return "$result"
 }

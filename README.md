@@ -1,4 +1,4 @@
-# Xray-2go v2.1.3
+# Xray-2go v2.1.4
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -160,5 +160,7 @@ unshare -m -- bash tests/uninstall_namespace.sh
 回归包含命名/UUID/Vision/IPv6、端口定位、固定域名、原子订阅、真实 Nginx 文件隔离、凭据回滚与迁移失败恢复。OpenRC 的 SIGKILL 自愈和主动停止另在临时端口验收。
 
 ## 说明
+
+**不依赖 coreutils，纯 busybox 的 Alpine 也能装。** v2.1.3 及以前在 `validate_xray_config` 里用 `mktemp "$work_dir/.validate.XXXXXX.json"`，而 busybox 的 `mktemp` 没有 GNU 的 `--suffix`，模板必须以 `XXXXXX` 结尾，于是全新安装到校验配置这一步直接报 `mktemp: : Invalid argument` 并触发失败归档。装了 coreutils 的机器（`mktemp` 走 GNU）不会复现，所以此前没有暴露。v2.1.4 起模板只写 `XXXXXX`、后缀自己拼，并在测试里用严格版 `mktemp` 兜住这个回归。`shuf`、`sort -V` 已确认 busybox 自带，无需额外依赖。
 
 继承上游四协议目标，保留来源与 MIT 授权。Hy2/TUIC 端口跳跃、AnyTLS、WARP、第三方订阅转换服务不属于本项目，不默认移入。安装不清空系统防火墙；如系统默认拒绝入站，需按自身防火墙策略放行选定端口。

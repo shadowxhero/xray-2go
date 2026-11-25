@@ -174,6 +174,25 @@ validate_xray_config() { jq -e '.inbounds|length>0' "$1" >/dev/null; }
         r = self.run_shell('curl() { cp "$work_dir/public/sub.txt" "${@: -1}"; }\nsleep() { :; }\nsubscription_probe\n', ok=False)
         self.assertNotEqual(r.returncode, 0)
 
+    def test_validate_survives_busybox_mktemp_without_suffix_support(self):
+        # Alpine 默认没有 coreutils：busybox mktemp 只接受以 XXXXXX 结尾的模板，
+        # 传 ".validate.XXXXXX.json" 会直接报 "mktemp: : Invalid argument"。
+        binary = self.home / 'xray'
+        binary.write_text('#!/bin/bash\n[[ "${@: -1}" == *.json ]] || exit 23\n'
+                          '[[ -s "${@: -1}" ]] || exit 24\n')
+        binary.chmod(0o700)
+        (self.home / 'cand').write_text(json.dumps(self.config))
+        self.run_shell(r'''
+mktemp() {
+    case "${@: -1}" in
+        *XXXXXX) command mktemp "$@";;
+        *) echo 'mktemp: : Invalid argument' >&2; return 1;;
+    esac
+}
+validate_xray_config "$work_dir/cand"
+''')
+        self.assertEqual(list(self.home.glob('.validate.*')), [])
+
     def test_validation_passes_json_extension_to_real_core_boundary(self):
         binary = self.home/'xray'
         binary.write_text('#!/bin/bash\n[[ "$*" == *"-format json"* ]] || exit 1\n[[ "${@: -1}" == *.json ]] || exit 23\njq -e . "${@: -1}" >/dev/null\n')
