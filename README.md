@@ -1,4 +1,4 @@
-# Xray-2go v2.2.1
+# Xray-2go v2.2.2
 
 基于 [eooce/xray-2go](https://github.com/eooce/xray-2go)，保留四协议：
 
@@ -33,6 +33,8 @@ PROTOCOLS=raw-reality,xhttp-reality bash <(curl -fsSL .../xray_2go.sh) --install
 可选值：`raw-reality`、`xhttp-reality`、`vless-argo`、`vmess-argo`。交互安装选「新安装」后会按编号再问一次：`13` 表示只装 RAW-Reality 与 VLESS-Argo，`1234` 或直接回车等于四个全装。
 
 **NAT 服务器必须在服务商面板配置端口映射。** 订阅和两个直连节点使用 TCP。修改机器内的监听端口并不会自动创建公网映射；Argo 内部端口不需要映射。
+
+**NAT 机型的入站 IP 与出口 IP 通常不同。** 容器内 `api.ipify.org` 返回的是宿主 SNAT 的出口地址，不是面板分配给该容器的入站地址，因此不能直接写进节点。v2.2.2 起安装时会检测默认路由接口是否为私有地址，是则提示输入面板分配的入站 IP；非交互安装必须用 `SERVER_IP=<入站IP>` 显式指定。装完才发现填错时，用菜单 15 修改直连 IP 即可，不必重装。
 
 ## 原安装升级 / Caddy 迁移
 

@@ -2,7 +2,7 @@
 # Xray-2go v2.2.1 — based on eooce/xray-2go (MIT).
 # 专属 Nginx、原生服务监督、原子订阅、隧道存活探测、WARP 分流与安全迁移。2026-11-25
 
-SCRIPT_VERSION=2.2.1
+SCRIPT_VERSION=2.2.2
 work_dir=/etc/xray
 config_dir="$work_dir/config.json"
 client_dir="$work_dir/url.txt"
@@ -49,6 +49,21 @@ get_realip() {
     ip=$(curl --noproxy '*' -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null) || ip=$(curl --noproxy '*' -6 -fsS --max-time 5 https://api64.ipify.org 2>/dev/null) || return 1
     valid_host "$ip" || return 1
     printf '%s\n' "$ip"
+}
+# NAT/共享 IP 机型：默认路由接口上只有私有地址，出口 IP 由宿主 SNAT 得到，
+# 不能当作面板分配的入站地址（入站映射是宿主上的 DNAT，容器内看不到）。
+is_nat_host() {
+    local dev ip
+    dev=$(awk '$2=="00000000"{print $1;exit}' /proc/net/route 2>/dev/null)
+    [ -n "$dev" ] || return 1
+    ip=$(ip addr show dev "$dev" 2>/dev/null | awk '/inet /{print $2;exit}' | cut -d/ -f1)
+    [ -n "$ip" ] || return 1
+    case "$ip" in
+        10.*|192.168.*) return 0 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[0-2][0-7].*) return 0 ;;
+    esac
+    return 1
 }
 # 沿用 Sing-box 的国家代码-服务商基础名；自定义 NODE_NAME 优先。
 resolve_node_name() {
@@ -1153,7 +1168,23 @@ install_fresh() (
     chmod 700 "$work_dir/xray" "$work_dir/argo"; rm -f "$work_dir/core.zip"
     uuid=${UUID:-$(random_uuid)}; output=$("$work_dir/xray" x25519) || return 1
     private=$(awk '/^PrivateKey/{print $NF}' <<< "$output"); [ -n "$private" ] || return 1
-    server=${SERVER_IP:-$(get_realip)}; server=$(normalize_host "$server"); valid_host "$server" || return 1
+    if [ -n "${SERVER_IP:-}" ]; then
+        server=$SERVER_IP
+    else
+        server=$(get_realip) || return 1
+        if is_nat_host; then
+            menu_color 33 "检测到 NAT/共享 IP 机型：本机出口 IP 为 $server，它通常不是面板分配的入站地址。"
+            if [ -t 0 ]; then
+                local ingress
+                read -r -p "请输入面板分配的入站 IP（直接回车沿用 $server）: " ingress || true
+                if [ -n "$ingress" ]; then server=$ingress; fi
+            else
+                red "NAT 机型安装需显式指定入站地址：SERVER_IP=<面板入站IP> bash <本脚本>"
+                return 1
+            fi
+        fi
+    fi
+    server=$(normalize_host "$server"); valid_host "$server" || return 1
     name=$(resolve_node_name)
     jq -n --arg id "$uuid" --arg private "$private" --argjson raw "$rawp" --argjson xh "$xhp" --argjson ap "$ap" '{log:{access:"/dev/null",error:"/dev/null",loglevel:"none"},inbounds:[{tag:"argo-entry",listen:"127.0.0.1",port:$ap,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none",fallbacks:[{dest:3001},{path:"/vless-argo",dest:3002},{path:"/vmess-argo",dest:3003}]},streamSettings:{network:"raw"}},{tag:"fallback",listen:"127.0.0.1",port:3001,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"raw"}},{tag:"vless-ws",listen:"127.0.0.1",port:3002,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"ws",wsSettings:{path:"/vless-argo"}}},{tag:"vmess-ws",listen:"127.0.0.1",port:3003,protocol:"vmess",settings:{clients:[{id:$id}]},streamSettings:{network:"ws",wsSettings:{path:"/vmess-argo"}}},{tag:"raw-reality",port:$raw,protocol:"vless",settings:{clients:[{id:$id,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"raw",security:"reality",realitySettings:{target:"www.iij.ad.jp:443",serverNames:["www.iij.ad.jp"],privateKey:$private,shortIds:[""]}}},{tag:"xhttp-reality",port:$xh,protocol:"vless",settings:{clients:[{id:$id}],decryption:"none"},streamSettings:{network:"xhttp",security:"reality",realitySettings:{target:"www.nazhumi.com:443",serverNames:["www.nazhumi.com"],privateKey:$private,shortIds:[""]}}}],outbounds:[{protocol:"freedom",tag:"direct"}]}' > "$config_dir"
     validate_xray_config "$config_dir" || return 1
@@ -1167,6 +1198,7 @@ install_fresh() (
     touch "$work_dir/.installed";rm -f "$work_dir/.installing"
     trap - EXIT
     green '安装完成。NAT 机器须映射订阅和两个直连 TCP 端口；Argo 无需映射内部端口。'
+    if is_nat_host; then menu_color 33 '若面板入站 IP 与上方节点地址不一致，请用菜单 15 修改直连 IP。';fi
     local wait_domain
     for wait_domain in {1..10};do sync_subscription || true;[ -n "$(state tunnel_domain || true)" ] && break;sleep 1;done
     if [ -z "$(state tunnel_domain || true)" ];then menu_color 33 '临时域名尚未取得，两个 Argo 节点暂不可用；同步器取得后会自动更新。';fi
